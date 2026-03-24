@@ -1,0 +1,1175 @@
+from fastapi import FastAPI, HTTPException, Depends, BackgroundTasks, Query
+from fastapi.staticfiles import StaticFiles
+from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse, Response
+from fastapi.security.api_key import APIKeyHeader
+from pydantic import BaseModel
+from typing import List, Optional, Dict, Any
+import shutil, os
+import datetime
+import time
+import uuid
+import logging
+import warnings
+import pandas as pd
+
+# Suppress the expected ParserWarning when reading uneven BioGears CSVs with index_col=False
+warnings.filterwarnings("ignore", category=pd.errors.ParserWarning)
+from pathlib import Path
+
+from biogears_service.simulation import scenario_builder, engine_runner, result_parser, visualizer
+from biogears_service.simulation.config import (
+    USER_STATES_DIR, BIO_OUTPUT_DIR, SCENARIO_API_DIR,
+    BASE_DIR, BIOGEARS_BIN_DIR, USER_HISTORY_DIR, REPORTS_DIR, LOGS_DIR
+)
+from biogears_service.simulation.substance_registry import ROUTE_GROUPS
+from biogears_service.simulation import validator as sim_validator
+from biogears_service.api import db, analytics, streaming
+
+# --- LOGGING & PATH VERIFICATION ---
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger("DigitalTwin")
+
+def run_path_checker():
+    paths = {
+        "Base Directory": BASE_DIR,
+        "User States": USER_STATES_DIR,
+        "User History": USER_HISTORY_DIR,
+        "Scenario API": SCENARIO_API_DIR,
+        "Reports Folder": REPORTS_DIR
+    }
+    print("\n" + "="*50 + "\n🔍 BIOGEARS SYSTEM PATH CHECK\n" + "="*50)
+    all_pass = True
+    for name, path in paths.items():
+        exists = Path(path).exists()
+        print(f"{name.ljust(20)}: {'✅ PASS' if exists else '❌ FAIL'} ({path})")
+        if not exists:
+            try:
+                Path(path).mkdir(parents=True, exist_ok=True)
+                print(f"   ∟ 🛠️ Auto-created: {name}")
+            except:
+                all_pass = False
+    return all_pass
+
+if not run_path_checker():
+    logger.warning("System paths are incomplete.")
+
+# --- APP INITIALIZATION ---
+app = FastAPI(
+    title="BioGears Digital Twin API",
+    version="4.0.0",
+    description="Physiological digital twin simulation API powered by BioGears."
+)
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+REPORT_DIR = BASE_DIR / "reports"
+REPORT_DIR.mkdir(exist_ok=True)
+app.mount("/view-reports", StaticFiles(directory=str(REPORT_DIR)), name="reports")
+
+# ---------------------------------------------------------------------------
+# OPTIONAL API KEY AUTH
+# ---------------------------------------------------------------------------
+# Set env var DIGITAL_TWIN_API_KEY to enable API key protection.
+# If not set, all endpoints are open (dev mode).
+API_KEY_ENV = os.environ.get("DIGITAL_TWIN_API_KEY", "")
+api_key_header = APIKeyHeader(name="X-API-Key", auto_error=False)
+
+async def require_api_key(key: str = Depends(api_key_header)):
+    if API_KEY_ENV and key != API_KEY_ENV:
+        raise HTTPException(status_code=403, detail="Invalid or missing API key. Set X-API-Key header.")
+
+# ---------------------------------------------------------------------------
+# IN-MEMORY JOB STORE  (job_id -> {status, result, error})
+# ---------------------------------------------------------------------------
+_jobs: Dict[str, Dict[str, Any]] = {}
+
+# ---------------------------------------------------------------------------
+# PER-USER RATE LIMITING  (max 3 simulations per hour per user)
+# ---------------------------------------------------------------------------
+import collections
+_sim_log: Dict[str, collections.deque] = {}  # user_id -> deque of epoch timestamps
+_RATE_LIMIT_MAX   = 3      # max allowed simulations
+_RATE_LIMIT_WINDOW = 3600  # rolling window in seconds (1 hour)
+
+def _check_rate_limit(user_id: str):
+    """Raises HTTP 429 if user has exceeded 3 simulations in the last hour."""
+    now = time.time()
+    if user_id not in _sim_log:
+        _sim_log[user_id] = collections.deque()
+    dq = _sim_log[user_id]
+    # Evict entries outside the rolling window
+    while dq and now - dq[0] > _RATE_LIMIT_WINDOW:
+        dq.popleft()
+    if len(dq) >= _RATE_LIMIT_MAX:
+        wait = int(_RATE_LIMIT_WINDOW - (now - dq[0]))
+        raise HTTPException(
+            status_code=429,
+            detail=(
+                f"Rate limit reached: max {_RATE_LIMIT_MAX} simulations per hour. "
+                f"Please wait {wait // 60}m {wait % 60}s before running another."
+            )
+        )
+    dq.append(now)
+
+
+# ---------------------------------------------------------------------------
+# DATA MODELS
+# ---------------------------------------------------------------------------
+class RegistrationRequest(BaseModel):
+    user_id: str
+    age: int
+    weight: float
+    height: float
+    sex: str              # "Male" or "Female"
+    body_fat: Optional[float] = 0.2
+    resting_hr: Optional[float] = 72.0
+    systolic_bp: Optional[float] = 114.0
+    diastolic_bp: Optional[float] = 73.5
+    is_smoker: Optional[bool] = False
+    has_anemia: Optional[bool] = False
+    has_type1_diabetes: Optional[bool] = False
+    has_type2_diabetes: Optional[bool] = False
+    # ── Extended clinical fields ──────────────────────────────────────────
+    hba1c: Optional[float] = None        # Glycated haemoglobin % (e.g. 7.2). For diabetics.
+    ethnicity: Optional[str] = "Other"   # "South Asian" | "Other" — affects BMI interpretation
+    fitness_level: Optional[str] = "sedentary"   # "sedentary" | "active" | "athlete"
+    vo2max: Optional[float] = None       # mL/kg/min — aerobic fitness marker (affects exercise ceiling)
+    current_medications: Optional[List[str]] = []  # e.g. ["Metformin", "Atorvastatin"]
+
+class HealthEvent(BaseModel):
+    event_type: str          # "exercise"|"sleep"|"meal"|"substance"|"water"|"environment"|"stress"|"alcohol"|"fast"
+    value: float
+    time_offset: int         # seconds from simulation start
+    # Substance events
+    substance_name: Optional[str]  = None
+    # Meal events
+    meal_type: Optional[str]       = None   # balanced|high_carb|high_protein|fast_food|ketogenic|custom
+    carb_g: Optional[float]        = None   # for custom meals
+    fat_g: Optional[float]         = None
+    protein_g: Optional[float]     = None
+    # Exercise / stress events
+    duration_seconds: Optional[int] = None  # how long to run (default 1800 s for exercise, 300 s for stress)
+    # Environment events
+    environment_name: Optional[str] = None  # e.g. "ExerciseEnvironment"
+    # Alcohol context (optional)
+    notes: Optional[str]           = None   # free-text clinical notes
+
+
+class BatchSyncRequest(BaseModel):
+    user_id: str
+    events: List[HealthEvent]
+
+class SingleSyncRequest(BaseModel):
+    user_id: str
+    event_type: str
+    value: float
+    time_offset: Optional[int]     = 0
+    substance_name: Optional[str]  = None
+    meal_type: Optional[str]       = None
+    duration_seconds: Optional[int] = None
+    environment_name: Optional[str] = None
+
+class PredictRequest(BaseModel):
+    user_id: str
+    hours: Optional[float] = 4.0
+
+class WhatIfRequest(BaseModel):
+    user_id: str
+    event: HealthEvent
+    hours: Optional[float] = 4.0
+
+class AsyncSyncRequest(BaseModel):
+    user_id: str
+    events: List[HealthEvent]
+
+# ---------------------------------------------------------------------------
+# INTERNAL HELPERS
+# ---------------------------------------------------------------------------
+BASE_URL = "http://127.0.0.1:8000"
+
+def _build_vitals_from_df(df: pd.DataFrame) -> dict:
+    df.columns = [c.split('(')[0].strip() for c in df.columns]
+    latest = df.iloc[-1].to_dict()
+    return {
+        "heart_rate":        round(latest.get("HeartRate", 0), 1),
+        "blood_pressure":    f"{int(latest.get('SystolicArterialPressure', 0))}/{int(latest.get('DiastolicArterialPressure', 0))}",
+        "glucose":           round(latest.get("Glucose-BloodConcentration", 0), 2),
+        "respiration":       round(latest.get("RespirationRate", 0), 1),
+        "spo2":              round(latest.get("OxygenSaturation", 0), 3),
+        "core_temperature":  round(latest.get("CoreTemperature", 0), 2),
+        "cardiac_output":    round(latest.get("CardiacOutput", 0), 2),
+    }
+
+def _run_batch_sync_blocking(user_id: str, events: list) -> dict:
+    """Runs the BioGears batch simulation. Returns a result dict or raises."""
+    # ── Rate limit check (3 simulations per hour per user) ─────────────────
+    _check_rate_limit(user_id)
+
+    state_file = USER_STATES_DIR / f"{user_id}.xml"
+
+    if not state_file.exists():
+        raise HTTPException(status_code=404, detail=f"Twin '{user_id}' not found.")
+
+    event_dicts = [e if isinstance(e, dict) else e.dict() for e in events]
+
+    # ── Validate before touching the engine ───────────────────────────────
+    errors = sim_validator.validate_events(event_dicts)
+    if errors:
+        raise HTTPException(status_code=422, detail={"validation_errors": errors})
+
+    sorted_events = sorted(event_dicts, key=lambda x: x['time_offset'])
+
+    path, run_id, csv_prefix = scenario_builder.build_batch_reconstruction(
+        user_id, str(state_file), sorted_events, user_weight_kg=user_weight_kg
+    )
+
+    if not engine_runner.run_biogears(path, user_id=user_id):
+        log = engine_runner.get_latest_log(user_id)
+        raise HTTPException(status_code=500,
+                            detail={"message": "Engine execution failed.",
+                                    "log_snippet": (log or "")[-500:]})
+
+    user_hist_path = USER_HISTORY_DIR / user_id
+    user_hist_path.mkdir(parents=True, exist_ok=True)
+    timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    dest_csv = user_hist_path / f"vitals_{timestamp}.csv"
+
+    # ── Search using csv_prefix from scenario_builder (consistent naming) ─
+    target_filename = f"{csv_prefix}Results.csv"
+    found = False
+    logger.info(f"🔎 Scanning for: {target_filename}")
+    for attempt in range(6):
+        possible_files = list(BIOGEARS_BIN_DIR.rglob(target_filename))
+        if possible_files:
+            ps = possible_files[0]
+            try:
+                shutil.copy2(str(ps), str(dest_csv))
+                os.remove(str(ps))
+                found = True
+                logger.info(f"✅ Results captured from {ps}")
+                break
+            except Exception as e:
+                logger.warning(f"⏳ File locked, retrying... ({e})")
+        if found:
+            break
+        time.sleep(2)
+
+    if not found:
+        raise HTTPException(status_code=500, detail="Engine output file missing.")
+
+    # Update state file
+    updated_state_filename = f"batch_{user_id}.xml"
+    possible_states = list(BIOGEARS_BIN_DIR.rglob(updated_state_filename))
+    if possible_states:
+        try:
+            os.replace(str(possible_states[0]), str(state_file))
+            logger.info("🔄 State synchronized.")
+        except Exception as e:
+            logger.warning(f"⚠️ State sync skipped: {e}")
+
+    # Fix for BioGears extra column bug: tell pandas not to use col 0 as index
+    df = pd.read_csv(dest_csv, index_col=False)
+    df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
+    vitals = _build_vitals_from_df(df)
+    report_url = visualizer.generate_health_report(user_id, custom_path=dest_csv)
+
+    # ── Anomaly detection ────────────────────────────────────────────────────
+    anomalies = result_parser.detect_anomalies(df)
+    if anomalies:
+        logger.warning(f"🚨 Anomalies for {user_id}: {[a['label'] for a in anomalies]}")
+
+    # ── Auto-backup state after every successful simulation ──────────────────
+    try:
+        bak_dir = USER_STATES_DIR / "backups" / user_id
+        bak_dir.mkdir(parents=True, exist_ok=True)
+        ts_bak = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        shutil.copy2(str(state_file), str(bak_dir / f"{user_id}_{ts_bak}.xml"))
+        for old in sorted(bak_dir.glob(f"{user_id}_*.xml"),
+                          key=os.path.getmtime, reverse=True)[7:]:
+            try: old.unlink()
+            except: pass
+    except Exception as bak_err:
+        logger.warning(f"Auto-backup failed (non-fatal): {bak_err}")
+
+    # ── Data-gap warning ─────────────────────────────────────────────────────
+    gap_hours = round(gap_seconds / 3600, 1)
+    data_gap_warning = None
+    if gap_seconds >= 86400:
+        data_gap_warning = (
+            f"⚠️ {gap_hours}h data gap detected. Your twin was advanced only {min(gap_hours, 8.0)}h "
+            f"and may not reflect real activity during the missing period."
+        )
+        logger.warning(f"⏳ Data gap for {user_id}: {gap_hours}h since last sync (capped at 8h advance)")
+
+    return {
+        "status": "success",
+        "vitals": vitals,
+        "report_url": report_url,
+        "data_gap_warning": data_gap_warning,
+        "gap_hours_advanced": min(gap_hours, 8.0),
+        "anomalies": anomalies,
+        "has_anomaly": len(anomalies) > 0,
+        "interaction_warnings": getattr(_run_batch_sync_blocking, '_last_interactions', []),
+    }
+
+
+# ---------------------------------------------------------------------------
+# ENDPOINTS
+# ---------------------------------------------------------------------------
+
+# ── 1. SUBSTANCES ────────────────────────────────────────────────────────────
+
+@app.get("/substances", dependencies=[Depends(require_api_key)],
+         summary="List all available substances and their administration routes")
+def get_substances():
+    """
+    Returns a structured list of every substance supported by the engine,
+    grouped by administration route.
+    """
+    return {"substances": ROUTE_GROUPS, "total": sum(len(v) for v in ROUTE_GROUPS.values())}
+
+
+# ── 2. PROFILES ──────────────────────────────────────────────────────────────
+
+@app.get("/profiles", dependencies=[Depends(require_api_key)],
+         summary="List all registered Digital Twins (supports filtering)")
+def get_all_profiles(
+    sex: Optional[str] = Query(None, description="Filter by sex: Male or Female"),
+    min_age: Optional[int] = Query(None, description="Minimum age (inclusive)"),
+    max_age: Optional[int] = Query(None, description="Maximum age (inclusive)"),
+    has_diabetes: Optional[bool] = Query(None, description="Filter twins with any diabetes"),
+    has_anemia: Optional[bool] = Query(None, description="Filter twins with anemia"),
+    is_smoker: Optional[bool] = Query(None, description="Filter smokers / COPD"),
+):
+    """
+    Returns every calibrated twin with metadata and last-active timestamp.
+    All query parameters are optional and can be combined for filtering.
+    """
+    try:
+        profiles = []
+        if not USER_STATES_DIR.exists():
+            return {"profiles": []}
+
+        stored = db.list_profiles()
+
+        for state_file in USER_STATES_DIR.glob("*.xml"):
+            uid = state_file.stem
+            meta = stored.get(uid, {})
+            conditions = meta.get("conditions", [])
+
+            # --- Apply filters ---
+            if sex and meta.get("sex", "").lower() != sex.lower():
+                continue
+            if min_age is not None and (meta.get("age") or 0) < min_age:
+                continue
+            if max_age is not None and (meta.get("age") or 999) > max_age:
+                continue
+            if has_diabetes is not None:
+                twin_has_diabetes = meta.get("has_type1_diabetes") or meta.get("has_type2_diabetes")
+                if has_diabetes != bool(twin_has_diabetes):
+                    continue
+            if has_anemia is not None and has_anemia != bool(meta.get("has_anemia")):
+                continue
+            if is_smoker is not None and is_smoker != bool(meta.get("is_smoker")):
+                continue
+
+            profiles.append({
+                "user_id": uid,
+                "status": "Calibrated",
+                "last_active": datetime.datetime.fromtimestamp(
+                    state_file.stat().st_mtime
+                ).isoformat(),
+                "age": meta.get("age"),
+                "sex": meta.get("sex"),
+                "weight_kg": meta.get("weight"),
+                "height_cm": meta.get("height"),
+                "conditions": conditions,
+            })
+
+        profiles.sort(key=lambda x: x["last_active"], reverse=True)
+        return {"profiles": profiles, "count": len(profiles)}
+    except Exception as e:
+        logger.error(f"❌ Failed to fetch profiles: {e}")
+        raise HTTPException(status_code=500, detail="Could not retrieve profile list.")
+
+
+@app.get("/profiles/{user_id}", dependencies=[Depends(require_api_key)],
+         summary="Get full metadata for a single Digital Twin")
+def get_profile(user_id: str):
+    """Returns stored demographic and clinical metadata for one twin."""
+    state_file = USER_STATES_DIR / f"{user_id}.xml"
+    if not state_file.exists():
+        raise HTTPException(status_code=404, detail=f"Twin '{user_id}' not found.")
+
+    meta = db.get_profile(user_id) or {}
+    return {
+        "user_id": user_id,
+        "status": "Calibrated",
+        "last_active": datetime.datetime.fromtimestamp(
+            state_file.stat().st_mtime
+        ).isoformat(),
+        "age": meta.get("age"),
+        "sex": meta.get("sex"),
+        "weight_kg": meta.get("weight"),
+        "height_cm": meta.get("height"),
+        "body_fat": meta.get("body_fat"),
+        "resting_hr": meta.get("resting_hr"),
+        "systolic_bp": meta.get("systolic_bp"),
+        "diastolic_bp": meta.get("diastolic_bp"),
+        "conditions": meta.get("conditions", []),
+    }
+
+
+@app.delete("/profiles/{user_id}", dependencies=[Depends(require_api_key)],
+            summary="Permanently delete a Digital Twin and all its data")
+def delete_profile(user_id: str):
+    """Removes the engine state, simulation history, and stored metadata."""
+    try:
+        state_file = USER_STATES_DIR / f"{user_id}.xml"
+        if state_file.exists():
+            os.remove(str(state_file))
+
+        history_folder = USER_HISTORY_DIR / user_id
+        if history_folder.exists():
+            shutil.rmtree(str(history_folder))
+
+        db.delete_profile(user_id)
+
+        logger.info(f"🗑️ Profile {user_id} purged.")
+        return {"status": "success", "message": f"Twin '{user_id}' deleted."}
+    except Exception as e:
+        logger.error(f"Delete failed: {e}")
+        raise HTTPException(status_code=500, detail="Deletion failed.")
+
+
+# ── 3. REGISTRATION ───────────────────────────────────────────────────────────
+
+@app.post("/register", dependencies=[Depends(require_api_key)],
+          summary="Register and calibrate a new Digital Twin")
+def register(data: RegistrationRequest):
+    """
+    Creates a BioGears patient scenario, runs engine calibration, and persists
+    the patient's demographic + clinical metadata to the database.
+    """
+    logger.info(f"🚀 Registering Twin: {data.user_id}")
+
+    # ── 1. Validate registration fields before touching the engine ────────────
+    reg_errors = sim_validator.validate_registration(data.dict())
+    if reg_errors:
+        logger.warning(f"❌ Registration validation failed for {data.user_id}: {reg_errors}")
+        raise HTTPException(status_code=422, detail={"validation_errors": reg_errors})
+
+    # ── 2. Guard: prevent accidental overwrite of an existing twin ────────────
+    existing_state = USER_STATES_DIR / f"{data.user_id}.xml"
+    if existing_state.exists():
+        raise HTTPException(
+            status_code=409,
+            detail=f"Twin '{data.user_id}' already exists. Delete it first or choose a different ID."
+        )
+
+    path = scenario_builder.build_registration_scenario(
+        data.user_id, data.age, data.weight, data.height,
+        data.sex, data.body_fat, data.dict()
+    )
+
+    if engine_runner.run_biogears(path):
+        target_file = BIOGEARS_BIN_DIR / f"{data.user_id}.xml"
+        perm_state = USER_STATES_DIR / f"{data.user_id}.xml"
+        if target_file.exists():
+            shutil.copy2(str(target_file), str(perm_state))
+            os.remove(str(target_file))
+
+            # Build conditions list for metadata
+            conditions = []
+            if data.is_smoker: conditions.append("Smoker / COPD")
+            if data.has_anemia: conditions.append("Chronic Anemia")
+            if data.has_type1_diabetes: conditions.append("Type 1 Diabetes")
+            if data.has_type2_diabetes: conditions.append("Type 2 Diabetes")
+
+            # Persist metadata
+            db.upsert_profile(data.user_id, {
+                "age": data.age,
+                "sex": data.sex,
+                "weight": data.weight,
+                "height": data.height,
+                "body_fat": data.body_fat,
+                "resting_hr": data.resting_hr,
+                "systolic_bp": data.systolic_bp,
+                "diastolic_bp": data.diastolic_bp,
+                "conditions": conditions,
+                "registered_at": datetime.datetime.now().isoformat(),
+                "is_smoker": data.is_smoker,
+                "has_anemia": data.has_anemia,
+                "has_type1_diabetes": data.has_type1_diabetes,
+                "has_type2_diabetes": data.has_type2_diabetes,
+                # Extended clinical fields
+                "hba1c": data.hba1c,
+                "ethnicity": data.ethnicity or "Other",
+            })
+
+            logger.info(f"✅ Twin {data.user_id} calibrated and metadata saved.")
+            return {"status": "success", "message": f"Twin '{data.user_id}' calibrated."}
+
+    raise HTTPException(status_code=500, detail="Engine convergence failure.")
+
+
+# ── 4. SYNC – BATCH ───────────────────────────────────────────────────────────
+
+@app.post("/sync/batch", dependencies=[Depends(require_api_key)],
+          summary="Log a batch of health events and retrieve updated vitals")
+def sync_batch(data: BatchSyncRequest):
+    """
+    Runs a BioGears simulation replay for all provided events (exercise, sleep,
+    meal, substance) and returns the resulting vital signs and a health report.
+    """
+    for e in data.events:
+        logger.info(f"📅 Timeline Item: {e.event_type} at T+{e.time_offset}s")
+    return _run_batch_sync_blocking(data.user_id, data.events)
+
+
+# ── 5. SYNC – SINGLE (convenience wrapper) ───────────────────────────────────
+
+@app.post("/sync/single", dependencies=[Depends(require_api_key)],
+          summary="Log a single health event — convenience endpoint")
+def sync_single(data: SingleSyncRequest):
+    """
+    Wraps /sync/batch for one event. Ideal for quick one-off logs like
+    'just had coffee' or 'started a 30-min run'.
+    """
+    event = HealthEvent(
+        event_type=data.event_type,
+        value=data.value,
+        time_offset=data.time_offset,
+        substance_name=data.substance_name
+    )
+    logger.info(f"📅 Single event: {data.event_type} (value={data.value}) for {data.user_id}")
+    return _run_batch_sync_blocking(data.user_id, [event])
+
+
+# ── 6. ASYNC SIMULATION ───────────────────────────────────────────────────────
+
+def _background_sync(job_id: str, user_id: str, events: list):
+    """Background task: run simulation and update job store on completion."""
+    _jobs[job_id]["status"] = "running"
+    try:
+        result = _run_batch_sync_blocking(user_id, events)
+        _jobs[job_id]["status"] = "done"
+        _jobs[job_id]["result"] = result
+    except HTTPException as e:
+        _jobs[job_id]["status"] = "failed"
+        _jobs[job_id]["error"] = e.detail
+    except Exception as e:
+        _jobs[job_id]["status"] = "failed"
+        _jobs[job_id]["error"] = str(e)
+
+
+@app.post("/simulate/async", dependencies=[Depends(require_api_key)],
+          summary="Start an async simulation — returns a job_id immediately")
+def simulate_async(data: AsyncSyncRequest, background_tasks: BackgroundTasks):
+    """
+    Kicks off a background simulation and immediately returns a job_id.
+    Poll GET /jobs/{job_id} to check progress and retrieve results.
+    """
+    state_file = USER_STATES_DIR / f"{data.user_id}.xml"
+    if not state_file.exists():
+        raise HTTPException(status_code=404, detail=f"Twin '{data.user_id}' not found.")
+
+    job_id = str(uuid.uuid4())
+    _jobs[job_id] = {"status": "pending", "user_id": data.user_id, "result": None, "error": None}
+
+    background_tasks.add_task(_background_sync, job_id, data.user_id, data.events)
+
+    logger.info(f"🔄 Async job {job_id} queued for {data.user_id}")
+    return {"job_id": job_id, "status": "pending", "poll_url": f"{BASE_URL}/jobs/{job_id}"}
+
+
+@app.get("/jobs/{job_id}", dependencies=[Depends(require_api_key)],
+         summary="Poll the status of an async simulation job")
+def get_job_status(job_id: str):
+    """
+    Returns the current status of a background simulation job.
+
+    - **pending** → queued, not started yet
+    - **running** → BioGears engine is executing
+    - **done** → finished, `result` contains vitals and report_url
+    - **failed** → something went wrong, `error` contains the reason
+    """
+    job = _jobs.get(job_id)
+    if not job:
+        raise HTTPException(status_code=404, detail=f"Job '{job_id}' not found.")
+    return {
+        "job_id": job_id,
+        "status": job["status"],
+        "user_id": job["user_id"],
+        "result": job.get("result"),
+        "error": job.get("error"),
+    }
+
+
+# ── 7. HISTORY ────────────────────────────────────────────────────────────────
+
+@app.get("/history/{user_id}", dependencies=[Depends(require_api_key)],
+         summary="List all simulation sessions for a twin")
+def get_history_list(user_id: str):
+    user_path = USER_HISTORY_DIR / user_id
+    if not user_path.exists():
+        return {"user_id": user_id, "sessions": []}
+
+    files = sorted(user_path.glob("vitals_*.csv"), key=os.path.getmtime, reverse=True)
+    sessions = []
+    for f in files:
+        sessions.append({
+            "session_id": f.name.replace("vitals_", "").replace(".csv", ""),
+            "timestamp": datetime.datetime.fromtimestamp(f.stat().st_mtime).isoformat()
+        })
+    return {"user_id": user_id, "sessions": sessions}
+
+
+@app.get("/history/{user_id}/{session_id}", dependencies=[Depends(require_api_key)],
+         summary="Get timeseries vitals data for a specific session")
+def get_session_data(user_id: str, session_id: str):
+    """Returns up to 100 downsampled data points for charting."""
+    file_path = USER_HISTORY_DIR / user_id / f"vitals_{session_id}.csv"
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="Session not found.")
+
+    # Fix for BioGears extra column bug: tell pandas not to use col 0 as index
+    df = pd.read_csv(file_path, index_col=False)
+    df = df.loc[:, ~df.columns.str.contains('^Unnamed')]
+    df.columns = [c.split('(')[0].strip() for c in df.columns]
+
+    if len(df) > 100:
+        df = df.iloc[::max(1, int(len(df) / 100))]
+
+    return df.to_dict(orient="records")
+
+
+# ── 8. REPORTS ────────────────────────────────────────────────────────────────
+
+@app.get("/reports/{user_id}", dependencies=[Depends(require_api_key)],
+         summary="List all generated health reports for a twin")
+def get_reports(user_id: str):
+    """
+    Scans the reports directory for PNGs belonging to this user and returns
+    their URLs for embedding in the frontend.
+    """
+    if not REPORT_DIR.exists():
+        return {"user_id": user_id, "reports": []}
+
+    report_files = sorted(
+        [f for f in REPORT_DIR.glob(f"{user_id}_*") if f.suffix in (".png", ".jpg")],
+        key=os.path.getmtime,
+        reverse=True
+    )
+
+    reports = []
+    for f in report_files:
+        stem = f.stem  # e.g. alice_20260322_150000_report
+        # Determine type
+        rtype = "forecast" if "forecast" in stem else "health"
+        reports.append({
+            "filename": f.name,
+            "type": rtype,
+            "url": f"{BASE_URL}/view-reports/{f.name}",
+            "created_at": datetime.datetime.fromtimestamp(f.stat().st_mtime).isoformat(),
+        })
+
+    return {"user_id": user_id, "reports": reports}
+
+
+# ── 9. FORECAST ───────────────────────────────────────────────────────────────
+
+@app.post("/predict/recovery", dependencies=[Depends(require_api_key)],
+          summary="Run a physiological forecast for the next N hours")
+def predict_recovery(data: PredictRequest):
+    """
+    Simulates the patient's physiology forward in time (default: 4 hours)
+    without any interventions, and returns a forecast chart URL.
+    """
+    state_file = USER_STATES_DIR / f"{data.user_id}.xml"
+    if not state_file.exists():
+        raise HTTPException(status_code=404, detail=f"Twin '{data.user_id}' not found.")
+
+    path, run_id = scenario_builder.build_forecast_scenario(
+        data.user_id, str(state_file), hours=data.hours
+    )
+    if engine_runner.run_biogears(path):
+        chart_url = visualizer.generate_forecast_report(data.user_id, run_id=run_id)
+        return {"status": "success", "forecast_chart": chart_url, "hours": data.hours}
+    raise HTTPException(status_code=500, detail="Forecast engine failed.")
+
+
+# ── GREEN TIER: ANALYTICS ENDPOINTS ──────────────────────────────────────────
+
+@app.get("/metrics/{user_id}", dependencies=[Depends(require_api_key)],
+         summary="Compute BMI, BSA, ideal weight and other body metrics")
+def get_metrics(user_id: str):
+    """
+    Derives body-composition metrics from stored profile metadata.
+    **No simulation required** — instant response.
+
+    - **BMI** with category (Underweight / Normal / Overweight / Obese)
+    - **BSA** (DuBois formula, m²)
+    - **Ideal Body Weight** (Devine formula, kg)
+    - **Weight vs Ideal** (percentage difference)
+    """
+    state_file = USER_STATES_DIR / f"{user_id}.xml"
+    if not state_file.exists():
+        raise HTTPException(status_code=404, detail=f"Twin '{user_id}' not found.")
+
+    meta = db.get_profile(user_id)
+    if not meta:
+        raise HTTPException(
+            status_code=404,
+            detail="Profile metadata not found. Re-register the twin to store metadata."
+        )
+
+    result = analytics.compute_metrics(meta)
+    if "error" in result:
+        raise HTTPException(status_code=422, detail=result["error"])
+    return result
+
+
+@app.get("/history/{user_id}/{session_id}/stats", dependencies=[Depends(require_api_key)],
+         summary="Get min/max/mean/std statistics for a specific session")
+def get_session_stats(user_id: str, session_id: str):
+    """
+    Returns descriptive statistics (min, max, mean, std) for every vital
+    tracked in a single simulation session.
+    """
+    csv_path = USER_HISTORY_DIR / user_id / f"vitals_{session_id}.csv"
+    if not csv_path.exists():
+        raise HTTPException(status_code=404, detail="Session not found.")
+
+    result = analytics.compute_session_stats(csv_path)
+    if "error" in result:
+        raise HTTPException(status_code=500, detail=result["error"])
+    return result
+
+
+@app.get("/vitals/{user_id}/trends", dependencies=[Depends(require_api_key)],
+         summary="Analyse how vitals have trended across all past sessions")
+def get_vitals_trends(user_id: str):
+    """
+    Aggregates data from every saved session to reveal long-term trends.
+
+    - Per-session average of each vital (ordered chronologically)
+    - Trend direction per vital: `increasing` / `decreasing` / `stable`
+    - Overall averages across all sessions
+    """
+    state_file = USER_STATES_DIR / f"{user_id}.xml"
+    if not state_file.exists():
+        raise HTTPException(status_code=404, detail=f"Twin '{user_id}' not found.")
+
+    return analytics.compute_trends(user_id, USER_HISTORY_DIR)
+
+
+@app.get("/health-score/{user_id}", dependencies=[Depends(require_api_key)],
+         summary="Get a 0–100 composite health score from the latest session")
+def get_health_score(user_id: str):
+    """
+    Calculates a composite health score (0–100, graded A–F) from the most
+    recent simulation session. Each vital is independently scored against
+    its clinical normal range and weighted equally.
+
+    > **Disclaimer**: This is a physiological simulation score, not a medical diagnosis.
+    """
+    state_file = USER_STATES_DIR / f"{user_id}.xml"
+    if not state_file.exists():
+        raise HTTPException(status_code=404, detail=f"Twin '{user_id}' not found.")
+
+    result = analytics.compute_health_score(user_id, USER_HISTORY_DIR)
+    if result.get("score") is None:
+        raise HTTPException(status_code=404, detail=result.get("error", "No sessions found."))
+    return result
+
+
+@app.get("/export/{user_id}", dependencies=[Depends(require_api_key)],
+         summary="Download a ZIP archive of all historical data for a twin")
+def export_user_data(user_id: str):
+    """
+    Packages all of a twin's simulation CSVs and their profile metadata
+    into a single `.zip` file for download or offline analysis.
+    """
+    state_file = USER_STATES_DIR / f"{user_id}.xml"
+    if not state_file.exists():
+        raise HTTPException(status_code=404, detail=f"Twin '{user_id}' not found.")
+
+    meta = db.get_profile(user_id) or {}
+    zip_bytes = analytics.build_export_zip(user_id, USER_HISTORY_DIR, meta)
+
+    filename = f"{user_id}_digital_twin_export_{datetime.datetime.now().strftime('%Y%m%d')}.zip"
+    return Response(
+        content=zip_bytes,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'}
+    )
+
+
+# ── SSE STREAMING ENDPOINTS ──────────────────────────────────────────────
+
+class StreamSyncRequest(BaseModel):
+    user_id: str
+    events: List[HealthEvent]
+
+
+@app.post("/stream/start", dependencies=[Depends(require_api_key)],
+          summary="Start an SSE-streaming simulation — returns a stream_id immediately")
+def stream_start(data: StreamSyncRequest):
+    """
+    Kicks off a BioGears simulation in a background thread and returns a
+    `stream_id` instantly.  The client should then open an EventSource
+    connection to `GET /stream/{stream_id}` to receive live vitals.
+
+    **Typical frontend flow:**
+    ```js
+    const {stream_id} = await fetch('/stream/start', {method:'POST', body: JSON.stringify(payload)}).then(r=>r.json())
+    const es = new EventSource(`/stream/${stream_id}`)
+    es.onmessage = e => { const d = JSON.parse(e.data); updateChart(d) }
+    ```
+    """
+    try:
+        result = streaming.start_stream(data.user_id, data.events)
+        return {
+            **result,
+            "sse_url": f"{streaming.BASE_URL}/stream/{result['stream_id']}"
+        }
+    except FileNotFoundError as e:
+        raise HTTPException(status_code=404, detail=str(e))
+    except Exception as e:
+        logger.error(f"Stream start failed: {e}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.get("/stream/{stream_id}", dependencies=[Depends(require_api_key)],
+         summary="SSE stream: connect with EventSource to receive live vitals")
+async def stream_vitals(stream_id: str):
+    """
+    **Server-Sent Events endpoint.**  Connect using the browser `EventSource`
+    API or any SSE client library.
+
+    Event types emitted:
+    | type | payload |
+    |------|---------|
+    | `status` | `{message: str}` — engine lifecycle messages |
+    | `vitals` | `{time, heart_rate, glucose, systolic, diastolic, respiration}` |
+    | `done` | `{vitals, report_url, rows_streamed}` — final summary |
+    | `error` | `{message: str}` — engine failure |
+    """
+    if stream_id not in streaming._stream_jobs:
+        raise HTTPException(status_code=404, detail=f"Stream '{stream_id}' not found.")
+
+    return StreamingResponse(
+        streaming.sse_generator(stream_id),
+        media_type="text/event-stream",
+        headers={
+            "Cache-Control": "no-cache",
+            "X-Accel-Buffering": "no",   # disables nginx buffering
+            "Connection": "keep-alive",
+        }
+    )
+
+
+# ── WHAT-IF COMPARISON ────────────────────────────────────────────────────────
+
+@app.post("/predict/whatif", dependencies=[Depends(require_api_key)],
+          summary="Run a what-if comparison: baseline vs one intervention event")
+def predict_whatif(data: WhatIfRequest):
+    """
+    Runs **two** BioGears simulations from the same engine state:
+
+    1. **Baseline** — advances time with no interventions
+    2. **Intervention** — applies `event` (exercise / meal / substance / environment), then advances
+
+    Returns chart URLs for both runs plus a **side-by-side comparison chart**.
+
+    > Note: Runs two full simulations sequentially — takes roughly 2× normal time.
+    """
+    state_file = USER_STATES_DIR / f"{data.user_id}.xml"
+    if not state_file.exists():
+        raise HTTPException(status_code=404, detail=f"Twin '{data.user_id}' not found.")
+
+    event_dict = data.event.dict()
+    errors = sim_validator.validate_events([event_dict])
+    if errors:
+        raise HTTPException(status_code=422, detail={"validation_errors": errors})
+
+    base_path, evt_path, base_run_id, evt_run_id, base_prefix, evt_prefix = \
+        scenario_builder.build_whatif_scenario(
+            data.user_id, str(state_file), event_dict, hours=data.hours
+        )
+
+    # Run baseline
+    if not engine_runner.run_biogears(base_path, user_id=data.user_id):
+        raise HTTPException(status_code=500, detail="Baseline simulation failed.")
+
+    base_csv_name = f"{base_prefix}Results.csv"
+    base_candidates = list(BIOGEARS_BIN_DIR.rglob(base_csv_name))
+    if not base_candidates:
+        raise HTTPException(status_code=500, detail="Baseline output CSV not found.")
+    base_df = pd.read_csv(str(base_candidates[0]), index_col=False)
+    base_df = base_df.loc[:, ~base_df.columns.str.contains('^Unnamed')]
+    base_df.columns = [c.split('(')[0].strip() for c in base_df.columns]
+    base_report = visualizer.generate_health_report(data.user_id, run_id=base_run_id,
+                                                    custom_path=base_candidates[0])
+
+    # Run intervention
+    if not engine_runner.run_biogears(evt_path, user_id=data.user_id):
+        raise HTTPException(status_code=500, detail="Intervention simulation failed.")
+
+    evt_csv_name = f"{evt_prefix}Results.csv"
+    evt_candidates = list(BIOGEARS_BIN_DIR.rglob(evt_csv_name))
+    if not evt_candidates:
+        raise HTTPException(status_code=500, detail="Intervention output CSV not found.")
+    evt_df = pd.read_csv(str(evt_candidates[0]), index_col=False)
+    evt_df = evt_df.loc[:, ~evt_df.columns.str.contains('^Unnamed')]
+    evt_df.columns = [c.split('(')[0].strip() for c in evt_df.columns]
+    evt_report = visualizer.generate_health_report(data.user_id, run_id=evt_run_id,
+                                                   custom_path=evt_candidates[0])
+
+    intervention_label = (
+        f"{event_dict.get('event_type', 'event').title()}"
+        + (f" ({event_dict.get('substance_name', '')})" if event_dict.get("substance_name") else "")
+    )
+    comparison_report = visualizer.generate_comparison_report(
+        data.user_id, base_df, evt_df, intervention_label=intervention_label
+    )
+
+    return {
+        "status": "success",
+        "hours": data.hours,
+        "baseline_chart": base_report,
+        "intervention_chart": evt_report,
+        "comparison_chart": comparison_report,
+        "intervention_label": intervention_label,
+    }
+
+
+# ── ENGINE LOG VIEWER ─────────────────────────────────────────────────────────
+
+@app.get("/engine/log/{user_id}", dependencies=[Depends(require_api_key)],
+         summary="Retrieve the latest BioGears engine log for debugging")
+def get_engine_log(user_id: str):
+    """
+    Returns the content of the most recent engine log file for a twin.
+    Useful for diagnosing simulation failures without SSH access to the server.
+    """
+    user_id = user_id
+    log_content = engine_runner.get_latest_log(user_id)
+    if log_content is None:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No engine logs found for '{user_id}'. "
+                   "Run at least one simulation first."
+        )
+    return {
+        "user_id": user_id,
+        "log": log_content,
+        "lines": len(log_content.splitlines()),
+    }
+
+
+# ── HEALTH CHECK ──────────────────────────────────────────────────────────────
+
+@app.get("/health", summary="System health check — no auth required")
+def health_check():
+    """
+    Returns the health status of all system components.
+    Suitable for uptime monitors — no API key required.
+    """
+    checks = {}
+    checks["engine_binary"]  = BIOGEARS_BIN_DIR.exists()
+    checks["states_dir"]     = USER_STATES_DIR.exists()
+    checks["history_dir"]    = USER_HISTORY_DIR.exists()
+    checks["scenarios_dir"]  = SCENARIO_API_DIR.exists()
+    checks["twin_count"]     = len(list(USER_STATES_DIR.glob("*.xml"))) if USER_STATES_DIR.exists() else 0
+    checks["in_memory_jobs"] = len(_jobs)
+
+    all_ok = all(v for k, v in checks.items() if isinstance(v, bool))
+    return {
+        "status": "healthy" if all_ok else "degraded",
+        "timestamp": datetime.datetime.now().isoformat(),
+        "checks": checks,
+    }
+
+
+# ── CVD RISK SCORE ────────────────────────────────────────────────────────────
+
+@app.get("/analytics/cvd-risk/{user_id}", dependencies=[Depends(require_api_key)],
+         summary="10-year cardiovascular risk score (Framingham + South Asian adjustment)")
+def get_cvd_risk(user_id: str):
+    """
+    Computes a 10-year CVD risk estimate from the twin's demographic + clinical metadata.
+    Uses Framingham point scoring with a 1.5× multiplier for South Asian ethnicity.
+    """
+    profile = db.get_profile(user_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail=f"Twin '{user_id}' not found.")
+    metadata = profile.get("metadata", {})
+    return analytics.compute_cvd_risk(metadata)
+
+
+# ── TIME-IN-RANGE ─────────────────────────────────────────────────────────────
+
+@app.get("/analytics/time-in-range/{user_id}/{session_id}",
+         dependencies=[Depends(require_api_key)],
+         summary="Time-in-Range glucose metric for a specific session")
+def get_time_in_range(user_id: str, session_id: str):
+    """
+    Returns TIR (time-in-range), TAR (time-above-range), TBR (time-below-range),
+    and glycemic variability CV% for one session's glucose data.
+    Thresholds: 70–140 mg/dL (non-diabetic), 70–180 mg/dL (diabetic users).
+    """
+    csv_path = USER_HISTORY_DIR / user_id / f"vitals_{session_id}.csv"
+    if not csv_path.exists():
+        raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found.")
+
+    profile   = db.get_profile(user_id) or {}
+    meta      = profile.get("metadata", {})
+    has_diab  = meta.get("has_type1_diabetes") or meta.get("has_type2_diabetes")
+    return analytics.compute_time_in_range(csv_path, has_diabetes=bool(has_diab))
+
+
+# ── PREDICTED HbA1c ────────────────────────────────────────────────────────────
+
+@app.get("/analytics/predicted-hba1c/{user_id}",
+         dependencies=[Depends(require_api_key)],
+         summary="Predicted HbA1c derived from simulated glucose averages")
+def get_predicted_hba1c(user_id: str):
+    """
+    Estimates HbA1c (%) from the average simulated blood glucose across all sessions.
+    Uses the ADAG formula: HbA1c = (mean_glucose + 46.7) / 28.7
+    """
+    result = analytics.predict_hba1c(user_id, USER_HISTORY_DIR)
+    if "error" in result:
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
+
+
+# ── WEEKLY INSIGHT SUMMARY ────────────────────────────────────────────────────
+
+@app.get("/analytics/weekly-summary/{user_id}",
+         dependencies=[Depends(require_api_key)],
+         summary="Plain-language weekly health insight summary")
+def get_weekly_summary(user_id: str):
+    """
+    Reads the last 7 sessions and returns:
+    - Best heart rate day
+    - Average glucose
+    - HR trend direction
+    - Personalized health insights as plain-text strings
+    """
+    result = analytics.generate_weekly_summary(user_id, USER_HISTORY_DIR)
+    if "error" in result:
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
+
+
+# ── PERSONAL NORMAL RANGES ────────────────────────────────────────────────────
+
+@app.get("/analytics/personal-norms/{user_id}",
+         dependencies=[Depends(require_api_key)],
+         summary="Personal vital normal ranges computed from user's own simulation history")
+def get_personal_norms(user_id: str):
+    """
+    After ≥ 5 sessions, computes personal mean ± 1SD for each vital.
+    Returns personal_lo and personal_hi thresholds per vital.
+    """
+    return analytics.compute_personal_norms(user_id, USER_HISTORY_DIR)
+
+
+# ── BMR / CALORIC BALANCE ─────────────────────────────────────────────────────
+
+@app.post("/analytics/caloric-balance/{user_id}",
+          dependencies=[Depends(require_api_key)],
+          summary="BMR and caloric balance estimate for a set of events")
+def get_caloric_balance(user_id: str, events: List[HealthEvent]):
+    """
+    Computes BMR (Mifflin-St Jeor) + exercise caloric burn and compares against
+    meal calorie intake from the provided event list.
+    """
+    profile = db.get_profile(user_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail=f"Twin '{user_id}' not found.")
+    meta = profile.get("metadata", {})
+    event_dicts = [e.dict() for e in events]
+    return analytics.compute_bmr_and_balance(meta, event_dicts)
+
+
+# ── TWIN STATE BACKUP ─────────────────────────────────────────────────────────
+
+@app.post("/twin/{user_id}/backup", dependencies=[Depends(require_api_key)],
+          summary="Create a timestamped backup of a twin's engine state")
+def backup_twin(user_id: str):
+    """
+    Copies the current engine state file to a dated backup.
+    Keeps the last 7 backups automatically.
+    """
+    state_file = USER_STATES_DIR / f"{user_id}.xml"
+    if not state_file.exists():
+        raise HTTPException(status_code=404, detail=f"Twin '{user_id}' not found.")
+
+    backup_dir = USER_STATES_DIR / "backups" / user_id
+    backup_dir.mkdir(parents=True, exist_ok=True)
+
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    dest = backup_dir / f"{user_id}_{ts}.xml"
+    shutil.copy2(str(state_file), str(dest))
+
+    # Prune — keep only the 7 most recent backups
+    existing = sorted(backup_dir.glob(f"{user_id}_*.xml"), key=os.path.getmtime, reverse=True)
+    for old in existing[7:]:
+        try: old.unlink()
+        except: pass
+
+    logger.info(f"🗂️ Backup created for {user_id}: {dest.name}")
+    return {
+        "status": "backup_created",
+        "file": dest.name,
+        "backups_kept": min(len(existing) + 1, 7),
+    }
+
+
+@app.post("/twin/{user_id}/restore", dependencies=[Depends(require_api_key)],
+          summary="Restore a twin's engine state from a backup")
+def restore_twin(user_id: str, backup_filename: str = Query(...)):
+    """
+    Restores a specific backup file as the active twin state.
+    Pass `backup_filename` (just the filename, not full path).
+    """
+    backup_dir = USER_STATES_DIR / "backups" / user_id
+    backup_file = backup_dir / backup_filename
+    if not backup_file.exists():
+        raise HTTPException(status_code=404,
+                            detail=f"Backup '{backup_filename}' not found for twin '{user_id}'.")
+
+    state_file = USER_STATES_DIR / f"{user_id}.xml"
+    shutil.copy2(str(backup_file), str(state_file))
+    logger.info(f"♻️ Twin {user_id} restored from backup: {backup_filename}")
+    return {"status": "restored", "from_backup": backup_filename}
+
+
+@app.get("/twin/{user_id}/backups", dependencies=[Depends(require_api_key)],
+         summary="List all available backups for a twin")
+def list_backups(user_id: str):
+    backup_dir = USER_STATES_DIR / "backups" / user_id
+    if not backup_dir.exists():
+        return {"backups": []}
+    files = sorted(backup_dir.glob(f"{user_id}_*.xml"), key=os.path.getmtime, reverse=True)
+    return {
+        "backups": [
+            {
+                "filename": f.name,
+                "created": datetime.datetime.fromtimestamp(f.stat().st_mtime).isoformat(),
+                "size_kb": round(f.stat().st_size / 1024, 1),
+            }
+            for f in files
+        ]
+    }
