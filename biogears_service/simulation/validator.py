@@ -253,5 +253,3 @@ def validate_interactions(events: List[Dict[str, Any]]) -> List[str]:
             )
 
     return warnings_list
-
-    return errors

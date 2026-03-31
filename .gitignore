@@ -1,0 +1,43 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+venv/
+.env
+*.egg-info/
+
+# BioGears engine binary (too large for git, install separately)
+biogears_service/engine/
+
+# Patient engine state files (personal data - never commit)
+user_states/
+
+# Simulation output CSVs (personal data)
+user_history/
+
+# Generated health reports (images)
+reports/
+
+# Logs
+logs/
+
+# Database
+twins_database.json
+
+# Scenarios generated at runtime
+Scenarios/
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# IDE
+.vscode/
+.idea/
+
+# Test artifacts
+*.log
+test_*.py
+debug_*.py

@@ -813,3 +813,115 @@ def generate_weekly_summary(user_id: str, history_dir: Path) -> Dict[str, Any]:
         "session_summary": session_stats,
         "generated_at":   datetime.datetime.now().isoformat(),
     }
+
+
+# ---------------------------------------------------------------------------
+# 13. RECOVERY READINESS SCORE
+# ---------------------------------------------------------------------------
+def compute_recovery_readiness(user_id: str, history_dir: Path,
+                                metadata: dict = None) -> dict:
+    """
+    Computes a 0–100 Recovery Readiness Score from recent simulation data.
+    Factors:
+      1. Resting HR deviation from personal baseline (lower = better recovery)
+      2. Sleep from most recent session (>=7h = well-recovered)
+      3. Time since last intense exercise (>24h = recovered)
+      4. VO2max (from profile) — higher VO2max = recovers faster
+
+    Interpretation:
+      80–100 → Ready (Green) — safe to train at full intensity
+      50–79  → Caution (Yellow) — moderate activity only
+      0–49   → Rest (Red) — recovery needed
+    """
+    metadata = metadata or {}
+    user_path = history_dir / user_id
+    if not user_path.exists():
+        return {"error": "No simulation history found for this user."}
+
+    csv_files = sorted(user_path.glob("vitals_*.csv"), key=os.path.getmtime, reverse=True)
+    if not csv_files:
+        return {"error": "No session data to compute recovery readiness."}
+
+    score = 100
+    factors = []
+
+    # ── Factor 1: Resting HR vs personal norm ───────────────────────────────
+    latest_df = _clean_df(csv_files[0])
+    resting_hr = None
+    personal_hr_mean = None
+
+    if latest_df is not None and "HeartRate" in latest_df.columns:
+        resting_hr = round(float(latest_df["HeartRate"].mean()), 1)
+
+        # Compute personal HR mean from last 5 sessions
+        hr_means = []
+        for f in csv_files[1:6]:
+            df = _clean_df(f)
+            if df is not None and "HeartRate" in df.columns:
+                hr_means.append(float(df["HeartRate"].mean()))
+
+        if hr_means:
+            personal_hr_mean = round(float(np.mean(hr_means)), 1)
+            hr_elevation = resting_hr - personal_hr_mean
+            if hr_elevation > 10:
+                penalty = min(30, int(hr_elevation * 2))
+                score -= penalty
+                factors.append(f"⚠️ Resting HR elevated by {round(hr_elevation, 1)} bpm above your baseline — suggests incomplete recovery.")
+            elif hr_elevation > 5:
+                score -= 10
+                factors.append(f"🟡 Resting HR slightly elevated (+{round(hr_elevation, 1)} bpm). Light activity recommended.")
+            else:
+                factors.append(f"✅ Resting HR ({resting_hr} bpm) is within your normal range.")
+        else:
+            if resting_hr and resting_hr > 85:
+                score -= 15
+                factors.append(f"🟡 Elevated resting HR ({resting_hr} bpm). Consider rest.")
+            elif resting_hr:
+                factors.append(f"✅ Resting HR is {resting_hr} bpm.")
+
+    # ── Factor 2: Recent sleep ───────────────────────────────────────────────
+    # We don't track sleep events in CSVs, so use metadata hint
+    last_sleep_h = metadata.get("last_sleep_hours")
+    if last_sleep_h is not None:
+        if last_sleep_h < 5:
+            score -= 25
+            factors.append(f"🔴 Only {last_sleep_h}h sleep logged — significant recovery deficit.")
+        elif last_sleep_h < 7:
+            score -= 12
+            factors.append(f"🟡 {last_sleep_h}h sleep. Aim for 7–9h for full recovery.")
+        else:
+            factors.append(f"✅ Good sleep ({last_sleep_h}h).")
+    else:
+        factors.append("ℹ️ No sleep data available. Log sleep events for a more accurate score.")
+
+    # ── Factor 3: VO2max boost (higher aerobic capacity = faster recovery) ──
+    vo2max = metadata.get("vo2max")
+    if vo2max:
+        if vo2max >= 50:
+            score = min(100, score + 5)
+            factors.append(f"✅ High VO2max ({vo2max} mL/kg/min) — superior recovery capacity.")
+        elif vo2max >= 35:
+            factors.append(f"ℹ️ Average VO2max ({vo2max} mL/kg/min).")
+        else:
+            score -= 5
+            factors.append(f"🟡 Low VO2max ({vo2max} mL/kg/min) — prioritise aerobic base training.")
+
+    score = max(0, min(100, score))
+
+    if score >= 80:
+        status, color, recommendation = "Ready", "#10b981", "Your body is recovered. Safe to train at full or high intensity today."
+    elif score >= 50:
+        status, color, recommendation = "Caution", "#f59e0b", "Moderate activity is fine. Avoid maximum-intensity training today."
+    else:
+        status, color, recommendation = "Rest", "#ef4444", "Recovery is incomplete. Prioritise sleep, hydration, and low-intensity activity."
+
+    return {
+        "readiness_score": score,
+        "status": status,
+        "color": color,
+        "recommendation": recommendation,
+        "resting_hr": resting_hr,
+        "personal_hr_baseline": personal_hr_mean,
+        "factors": factors,
+        "note": "Readiness is estimated from simulated physiological data, not a clinical assessment.",
+    }

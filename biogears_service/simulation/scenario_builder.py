@@ -40,7 +40,6 @@ _DATA_REQUESTS = """    <DataRequests Filename="{prefix}">
         <DataRequest xsi:type="PhysiologyDataRequestData" Name="TidalVolume"                 Unit="mL"     Precision="2"/>
         <DataRequest xsi:type="PhysiologyDataRequestData" Name="ArterialBloodPH"             Unit="unitless" Precision="2"/>
         <DataRequest xsi:type="PhysiologyDataRequestData" Name="AchievedExerciseLevel"       Unit="unitless" Precision="3"/>
-        <DataRequest xsi:type="PhysiologyDataRequestData" Name="FatigueLevelFraction"        Unit="unitless" Precision="3"/>
         <DataRequest xsi:type="SubstanceDataRequestData"  Substance="Glucose" Name="BloodConcentration" Unit="mg/dL"  Precision="2"/>
     </DataRequests>"""
 
@@ -68,8 +67,8 @@ def _meal_xml(calories: float, meal_type: str,
         c = round(calories * preset["carb"] / _KCAL["carb"], 1)
         f = round(calories * preset["fat"]  / _KCAL["fat"],  1)
         p = round(calories * preset["protein"] / _KCAL["protein"], 1)
-    # Water approximation: 0.3 mL per kcal (rough average for mixed meals)
-    w = round(calories * 0.0003, 3)
+    # Water approximation: 0.5 mL per kcal (physiological average for mixed meals)
+    w = round(calories * 0.0005, 3)
     return (
         f'        <Action xsi:type="ConsumeNutrientsData">\n'
         f'            <Nutrition>\n'
@@ -237,7 +236,37 @@ def _circadian_phase_xml(wall_hour: int) -> str:
         return ""
 
 
+def _catchup_routine_xml(weight_kg: float) -> str:
+    """
+    Simulates a generic 24-hour day to catch up physiological state after missing a day.
+    Includes normal hydration, 3 meals (2000 kcal), and 8 hours of sleep.
+    """
+    xml = "        <!-- START CATCH-UP ROUTINE (simulating missing day) -->\n"
+    # Wake up, drink water (250mL)
+    xml += _water_xml(250.0)
+    xml += _advance_xml(1800) # 0.5 h
 
+    # Breakfast (500 kcal)
+    xml += _meal_xml(500, "balanced")
+    xml += _advance_xml(14400) # 4 h
+
+    # Lunch (700 kcal) + water
+    xml += _water_xml(300.0)
+    xml += _meal_xml(700, "balanced")
+    xml += _advance_xml(18000) # 5 h
+
+    # Dinner (800 kcal) + water
+    xml += _water_xml(300.0)
+    xml += _meal_xml(800, "balanced")
+    xml += _advance_xml(23400) # 6.5 h
+
+    # Sleep (8 hours)
+    xml += '        <Action xsi:type="SleepData" Sleep="On"/>\n'
+    xml += _advance_xml(28800) # 8 h
+    xml += '        <Action xsi:type="SleepData" Sleep="Off"/>\n'
+    
+    xml += "        <!-- END CATCH-UP ROUTINE -->\n"
+    return xml
 
 def _scenario_header(state_path: str, data_requests: str) -> str:
     return (
@@ -369,22 +398,33 @@ def build_batch_reconstruction(user_id, state_path, events: list, user_weight_kg
     wall_hour = datetime.datetime.now().hour
     actions_xml = _circadian_phase_xml(wall_hour)
 
-    # ── Basal gap (cap at 8 hours to prevent runaway fast-forward) ───────────
-    last_modified = os.path.getmtime(state_path)
-    gap_seconds   = min(int(time.time() - last_modified), 28800)
+    # ── Basal gap / Missed Day Routine ───────────────────────────────────────
+    engine_clock = os.path.getmtime(state_path)
+    current_time = time.time()
+    
+    # Target time is the first event, or now if there are no events
+    target_time = events[0].get("timestamp", current_time) if events else current_time
+    
+    # Catch up full missing days iteratively to reset physiology to baseline
+    while target_time - engine_clock >= 86400:
+        actions_xml += _catchup_routine_xml(user_weight_kg)
+        engine_clock += 86400
 
+    gap_seconds = int(target_time - engine_clock)
+    
     if gap_seconds > 10:
-        actions_xml += f"        <!-- Basal gap: {gap_seconds}s since last sync -->\n"
+        actions_xml += f"        <!-- Basal gap: {gap_seconds}s since last sync to first event -->\n"
         actions_xml += _advance_xml(gap_seconds)
+        engine_clock += gap_seconds
 
-    current_sim_time    = 0
     last_substance_time = -99999
 
-    for event in sorted(events, key=lambda x: x["time_offset"]):
-        wait_time = event["time_offset"] - current_sim_time
+    for event in sorted(events, key=lambda x: x.get("timestamp", 0)):
+        ev_ts = event.get("timestamp", engine_clock)
+        wait_time = int(ev_ts - engine_clock)
         if wait_time > 0:
             actions_xml += _advance_xml(wait_time)
-            current_sim_time += wait_time
+            engine_clock += wait_time
 
         etype = event["event_type"]
         val   = event.get("value", 0)
@@ -392,11 +432,11 @@ def build_batch_reconstruction(user_id, state_path, events: list, user_weight_kg
         if etype == "exercise":
             intensity       = float(val)
             duration_sec    = int(event.get("duration_seconds") or 1800)
-            duration_sec    = max(60, min(duration_sec, 14400))  # clamp 1min–4hr
+            duration_sec    = max(60, min(duration_sec, 14400))
             actions_xml    += _exercise_xml(intensity)
             actions_xml    += _advance_xml(duration_sec)
-            current_sim_time += duration_sec
-            actions_xml    += _exercise_xml(0.0)   # explicit off-ramp
+            engine_clock   += duration_sec
+            actions_xml    += _exercise_xml(0.0)
 
         elif etype == "sleep":
             hours       = max(0.25, min(float(val), 12.0))
@@ -404,7 +444,7 @@ def build_batch_reconstruction(user_id, state_path, events: list, user_weight_kg
             actions_xml += '        <Action xsi:type="SleepData" Sleep="On"/>\n'
             actions_xml += _advance_xml(sleep_sec)
             actions_xml += '        <Action xsi:type="SleepData" Sleep="Off"/>\n'
-            current_sim_time += sleep_sec
+            engine_clock += sleep_sec
 
         elif etype == "meal":
             actions_xml += _meal_xml(
@@ -419,37 +459,49 @@ def build_batch_reconstruction(user_id, state_path, events: list, user_weight_kg
             actions_xml += _water_xml(float(val))
 
         elif etype == "substance":
-            is_stacked   = (event["time_offset"] - last_substance_time) < 14400
+            is_stacked   = (ev_ts - last_substance_time) < 14400
             sub_name     = event.get("substance_name", "Caffeine")
             actions_xml += _substance_xml(sub_name, float(val), is_stacked)
-            last_substance_time = event["time_offset"]
+            last_substance_time = ev_ts
 
         elif etype == "environment":
             env_name     = event.get("environment_name", "StandardEnvironment")
             actions_xml += _environment_xml(env_name)
 
-        elif etype == "stress":                          # ── NEW
+        elif etype == "stress":                          
             intensity    = max(0.0, min(1.0, float(val)))
+            dur          = int(event.get("duration_seconds", 300))
             actions_xml += _stress_xml(intensity)
-            actions_xml += _advance_xml(int(event.get("duration_seconds", 300)))
-            # Recover — gradually reduce stress back to 0
+            actions_xml += _advance_xml(dur)
+            engine_clock += dur
             actions_xml += _stress_xml(intensity * 0.3)
             actions_xml += _advance_xml(300)
+            engine_clock += 300
             actions_xml += _stress_xml(0.0)
 
-        elif etype == "alcohol":                         # ── NEW
-            # value = number of standard drinks (1 drink = 14g ethanol)
+        elif etype == "alcohol":
             actions_xml += _alcohol_xml(float(val), weight_kg=user_weight_kg)
-            # Alcohol absorption takes ~30 min before peak
             actions_xml += _advance_xml(1800)
+            engine_clock += 1800
 
-        elif etype == "fast":                            # ── NEW
+        elif etype == "fast":
             hours = max(1.0, min(48.0, float(val)))
+            fast_sec = int(hours * 3600)
             actions_xml += _fasting_xml(hours)
-            current_sim_time += int(hours * 3600)
+            engine_clock += fast_sec  # _fasting_xml advances exactly fast_sec internally
 
-    # Final stabilisation period
-    actions_xml += _advance_xml(600)
+    # Final stabilisation or catch-up to present time
+    final_gap = int(time.time() - engine_clock)
+    if final_gap > 10:
+        while final_gap >= 86400:
+            actions_xml += _catchup_routine_xml(user_weight_kg)
+            engine_clock += 86400
+            final_gap -= 86400
+        # Cap remaining daytime gap to 4 hours to avoid starvation before next meal is inevitably logged
+        actions_xml += _advance_xml(min(final_gap, 14400))
+    else:
+        # Minimum baseline padding for engine
+        actions_xml += _advance_xml(60)
 
     data_req = _DATA_REQUESTS.format(prefix=csv_prefix)
     xml = (

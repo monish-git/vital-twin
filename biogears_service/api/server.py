@@ -5,7 +5,7 @@ from fastapi.responses import StreamingResponse, Response
 from fastapi.security.api_key import APIKeyHeader
 from pydantic import BaseModel
 from typing import List, Optional, Dict, Any
-import shutil, os
+import shutil, os, math
 import datetime
 import time
 import uuid
@@ -95,8 +95,8 @@ _jobs: Dict[str, Dict[str, Any]] = {}
 # ---------------------------------------------------------------------------
 import collections
 _sim_log: Dict[str, collections.deque] = {}  # user_id -> deque of epoch timestamps
-_RATE_LIMIT_MAX   = 3      # max allowed simulations
-_RATE_LIMIT_WINDOW = 3600  # rolling window in seconds (1 hour)
+_RATE_LIMIT_MAX   = int(os.environ.get("SIM_RATE_LIMIT", "10"))  # max sims per rolling window
+_RATE_LIMIT_WINDOW = int(os.environ.get("SIM_RATE_WINDOW", "3600"))  # window in seconds (1 hr)
 
 def _check_rate_limit(user_id: str):
     """Raises HTTP 429 if user has exceeded 3 simulations in the last hour."""
@@ -146,7 +146,8 @@ class RegistrationRequest(BaseModel):
 class HealthEvent(BaseModel):
     event_type: str          # "exercise"|"sleep"|"meal"|"substance"|"water"|"environment"|"stress"|"alcohol"|"fast"
     value: float
-    time_offset: int         # seconds from simulation start
+    time_offset: Optional[int] = None        # deprecated
+    timestamp: Optional[float] = None        # Epoch Unix timestamp
     # Substance events
     substance_name: Optional[str]  = None
     # Meal events
@@ -170,7 +171,8 @@ class SingleSyncRequest(BaseModel):
     user_id: str
     event_type: str
     value: float
-    time_offset: Optional[int]     = 0
+    time_offset: Optional[int]     = None
+    timestamp: Optional[float]     = None
     substance_name: Optional[str]  = None
     meal_type: Optional[str]       = None
     duration_seconds: Optional[int] = None
@@ -197,14 +199,19 @@ BASE_URL = "http://127.0.0.1:8000"
 def _build_vitals_from_df(df: pd.DataFrame) -> dict:
     df.columns = [c.split('(')[0].strip() for c in df.columns]
     latest = df.iloc[-1].to_dict()
+
+    def _safe(key):
+        v = latest.get(key)
+        return None if v is None or (isinstance(v, float) and math.isnan(v)) else v
+
     return {
-        "heart_rate":        round(latest.get("HeartRate", 0), 1),
-        "blood_pressure":    f"{int(latest.get('SystolicArterialPressure', 0))}/{int(latest.get('DiastolicArterialPressure', 0))}",
-        "glucose":           round(latest.get("Glucose-BloodConcentration", 0), 2),
-        "respiration":       round(latest.get("RespirationRate", 0), 1),
-        "spo2":              round(latest.get("OxygenSaturation", 0), 3),
-        "core_temperature":  round(latest.get("CoreTemperature", 0), 2),
-        "cardiac_output":    round(latest.get("CardiacOutput", 0), 2),
+        "heart_rate":       round(_safe("HeartRate"), 1)          if _safe("HeartRate") is not None else None,
+        "blood_pressure":   f"{int(_safe('SystolicArterialPressure'))}/{int(_safe('DiastolicArterialPressure'))}" if _safe("SystolicArterialPressure") is not None else None,
+        "glucose":          round(_safe("Glucose-BloodConcentration"), 2) if _safe("Glucose-BloodConcentration") is not None else None,
+        "respiration":      round(_safe("RespirationRate"), 1)    if _safe("RespirationRate") is not None else None,
+        "spo2":             round(_safe("OxygenSaturation"), 3)   if _safe("OxygenSaturation") is not None else None,
+        "core_temperature": round(_safe("CoreTemperature"), 2)    if _safe("CoreTemperature") is not None else None,
+        "cardiac_output":   round(_safe("CardiacOutput"), 2)      if _safe("CardiacOutput") is not None else None,
     }
 
 def _run_batch_sync_blocking(user_id: str, events: list) -> dict:
@@ -219,12 +226,24 @@ def _run_batch_sync_blocking(user_id: str, events: list) -> dict:
 
     event_dicts = [e if isinstance(e, dict) else e.dict() for e in events]
 
+    now_ts = time.time()
+    for e in event_dicts:
+        if not e.get('timestamp'):
+            e['timestamp'] = now_ts + (e.get('time_offset') or 0)
+
     # ── Validate before touching the engine ───────────────────────────────
     errors = sim_validator.validate_events(event_dicts)
     if errors:
         raise HTTPException(status_code=422, detail={"validation_errors": errors})
 
-    sorted_events = sorted(event_dicts, key=lambda x: x['time_offset'])
+    # ── Drug interaction check (non-blocking — returned as warnings) ───────
+    interaction_warnings = sim_validator.validate_interactions(event_dicts)
+
+    sorted_events = sorted(event_dicts, key=lambda x: x['timestamp'])
+
+    meta = db.get_profile(user_id) or {}
+    user_weight_kg = float(meta.get("weight", 70.0))
+    gap_seconds = time.time() - os.path.getmtime(str(state_file))
 
     path, run_id, csv_prefix = scenario_builder.build_batch_reconstruction(
         user_id, str(state_file), sorted_events, user_weight_kg=user_weight_kg
@@ -316,7 +335,8 @@ def _run_batch_sync_blocking(user_id: str, events: list) -> dict:
         "gap_hours_advanced": min(gap_hours, 8.0),
         "anomalies": anomalies,
         "has_anomaly": len(anomalies) > 0,
-        "interaction_warnings": getattr(_run_batch_sync_blocking, '_last_interactions', []),
+        "interaction_warnings": interaction_warnings,
+        "has_drug_interaction": len(interaction_warnings) > 0,
     }
 
 
@@ -547,6 +567,7 @@ def sync_single(data: SingleSyncRequest):
         event_type=data.event_type,
         value=data.value,
         time_offset=data.time_offset,
+        timestamp=data.timestamp or time.time(),
         substance_name=data.substance_name
     )
     logger.info(f"📅 Single event: {data.event_type} (value={data.value}) for {data.user_id}")
@@ -697,7 +718,7 @@ def predict_recovery(data: PredictRequest):
     if not state_file.exists():
         raise HTTPException(status_code=404, detail=f"Twin '{data.user_id}' not found.")
 
-    path, run_id = scenario_builder.build_forecast_scenario(
+    path, run_id, _csv_prefix = scenario_builder.build_forecast_scenario(
         data.user_id, str(state_file), hours=data.hours
     )
     if engine_runner.run_biogears(path):
@@ -1012,8 +1033,8 @@ def get_cvd_risk(user_id: str):
     profile = db.get_profile(user_id)
     if not profile:
         raise HTTPException(status_code=404, detail=f"Twin '{user_id}' not found.")
-    metadata = profile.get("metadata", {})
-    return analytics.compute_cvd_risk(metadata)
+    # db.get_profile() returns the metadata dict directly (not nested under 'metadata')
+    return analytics.compute_cvd_risk(profile)
 
 
 # ── TIME-IN-RANGE ─────────────────────────────────────────────────────────────
@@ -1032,8 +1053,8 @@ def get_time_in_range(user_id: str, session_id: str):
         raise HTTPException(status_code=404, detail=f"Session '{session_id}' not found.")
 
     profile   = db.get_profile(user_id) or {}
-    meta      = profile.get("metadata", {})
-    has_diab  = meta.get("has_type1_diabetes") or meta.get("has_type2_diabetes")
+    # db.get_profile() returns the metadata dict directly
+    has_diab  = profile.get("has_type1_diabetes") or profile.get("has_type2_diabetes")
     return analytics.compute_time_in_range(csv_path, has_diabetes=bool(has_diab))
 
 
@@ -1085,6 +1106,29 @@ def get_personal_norms(user_id: str):
     return analytics.compute_personal_norms(user_id, USER_HISTORY_DIR)
 
 
+# ── RECOVERY READINESS ────────────────────────────────────────────────────────
+
+@app.get("/analytics/recovery-readiness/{user_id}",
+         dependencies=[Depends(require_api_key)],
+         summary="Recovery Readiness Score (0–100): Ready / Caution / Rest")
+def get_recovery_readiness(user_id: str):
+    """
+    Computes a composite Recovery Readiness Score from:
+    - Resting HR deviation from personal baseline (HR elevation = fatigue)
+    - Recent sleep hours if logged
+    - VO2max from profile (higher = faster recovery)
+
+    Returns a Ready/Caution/Rest recommendation with factor breakdown.
+    """
+    profile = db.get_profile(user_id)
+    if not profile:
+        raise HTTPException(status_code=404, detail=f"Twin '{user_id}' not found.")
+    result = analytics.compute_recovery_readiness(user_id, USER_HISTORY_DIR, metadata=profile)
+    if "error" in result:
+        raise HTTPException(status_code=404, detail=result["error"])
+    return result
+
+
 # ── BMR / CALORIC BALANCE ─────────────────────────────────────────────────────
 
 @app.post("/analytics/caloric-balance/{user_id}",
@@ -1098,9 +1142,9 @@ def get_caloric_balance(user_id: str, events: List[HealthEvent]):
     profile = db.get_profile(user_id)
     if not profile:
         raise HTTPException(status_code=404, detail=f"Twin '{user_id}' not found.")
-    meta = profile.get("metadata", {})
+    # db.get_profile() returns the metadata dict directly
     event_dicts = [e.dict() for e in events]
-    return analytics.compute_bmr_and_balance(meta, event_dicts)
+    return analytics.compute_bmr_and_balance(profile, event_dicts)
 
 
 # ── TWIN STATE BACKUP ─────────────────────────────────────────────────────────
