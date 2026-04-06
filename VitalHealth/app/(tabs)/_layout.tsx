@@ -30,10 +30,10 @@ export default function TabLayout() {
           },
           tabBarActiveTintColor: colors.active,
           tabBarInactiveTintColor: colors.inactive,
-          tabBarLabelStyle: { fontSize: 11, marginBottom: 4, fontWeight: "600" },
+          tabBarLabelStyle: { fontSize: 10, marginBottom: 4, fontWeight: "600" },
         }}
       >
-        {/* HOME — external device telemetry */}
+        {/* HOME */}
         <Tabs.Screen
           name="index"
           options={{
@@ -42,7 +42,7 @@ export default function TabLayout() {
           }}
         />
 
-        {/* HISTORY */}
+        {/* HISTORY — combined app + BioGears timeline */}
         <Tabs.Screen
           name="history"
           options={{
@@ -51,12 +51,12 @@ export default function TabLayout() {
           }}
         />
 
-        {/* DIGITAL TWIN — simulation + routine logging */}
+        {/* DIGITAL TWIN — simulation command center */}
         <Tabs.Screen
           name="twin"
           options={{
             title: "Twin",
-            tabBarIcon: ({ color }) => <Ionicons name="person" size={24} color={color} />,
+            tabBarIcon: ({ color }) => <Ionicons name="pulse" size={26} color={color} />,
           }}
         />
 
@@ -65,16 +65,24 @@ export default function TabLayout() {
           name="insights"
           options={{
             title: "Insights",
-            tabBarIcon: ({ color }) => <Ionicons name="pulse" size={24} color={color} />,
+            tabBarIcon: ({ color }) => <Ionicons name="analytics" size={24} color={color} />,
           }}
         />
 
-        {/* AI HEALTH */}
+        {/* PROFILE */}
+        <Tabs.Screen
+          name="profile"
+          options={{
+            title: "Profile",
+            tabBarIcon: ({ color }) => <Ionicons name="person-circle" size={24} color={color} />,
+          }}
+        />
+
+        {/* AI HEALTH — hidden from tab bar, navigated to from home */}
         <Tabs.Screen
           name="ai-health"
           options={{
-            title: "AI Health",
-            tabBarIcon: ({ color }) => <Ionicons name="chatbubble" size={24} color={color} />,
+            href: null, // hides from tab bar
           }}
         />
       </Tabs>

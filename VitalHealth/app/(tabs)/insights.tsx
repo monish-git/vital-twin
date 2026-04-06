@@ -7,6 +7,7 @@ import {
   TouchableOpacity,
   Dimensions,
   ActivityIndicator,
+  Platform,
   RefreshControl,
 } from 'react-native';
 // BlurView removed — not used in this screen
@@ -14,6 +15,7 @@ import {
 import { Ionicons } from '@expo/vector-icons';
 import { LinearGradient } from 'expo-linear-gradient';
 import { useRouter } from 'expo-router';
+import { useSafeAreaInsets } from 'react-native-safe-area-context';
 import { useBiogearsTwin } from '../../context/BiogearsTwinContext';
 import { useTheme } from '../../context/ThemeContext';
 import { colors } from '../../theme/colors';
@@ -43,6 +45,9 @@ export default function InsightsScreen() {
 
   const [refreshing, setRefreshing] = useState(false);
   const c = colors[theme];
+  const insets = useSafeAreaInsets();
+  const statusBarH = Math.max(insets.top, Platform.OS === 'android' ? 24 : 20);
+  const headerH = statusBarH + 52;
 
   const onRefresh = useCallback(async () => {
     setRefreshing(true);
@@ -59,7 +64,7 @@ export default function InsightsScreen() {
     return (
       <View style={[styles.container, { backgroundColor: c.bg }]}>
         <Header title="Insights" showBack={false} />
-        <View style={styles.emptyContainer}>
+        <View style={[styles.emptyContainer, { marginTop: headerH }]}>
           <Ionicons name="analytics-outline" size={80} color={c.sub} />
           <Text style={[styles.emptyTitle, { color: c.text }]}>No Insights Yet</Text>
           <Text style={[styles.emptySub, { color: c.sub }]}>
@@ -76,9 +81,10 @@ export default function InsightsScreen() {
 
       <ScrollView
         style={styles.scrollView}
-        contentContainerStyle={styles.scrollContent}
+        contentContainerStyle={[styles.scrollContent, { paddingTop: headerH }]}
         refreshControl={
-          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={c.active} />
+          <RefreshControl refreshing={refreshing} onRefresh={onRefresh} tintColor={c.active}
+            progressViewOffset={headerH} />
         }
       >
         {/* ── SECTION 1: TODAY'S MACROS ── */}

@@ -197,28 +197,36 @@ class AsyncSyncRequest(BaseModel):
 BASE_URL = "http://127.0.0.1:8000"
 
 def _build_vitals_from_df(df: pd.DataFrame) -> dict:
-    df.columns = [c.split('(')[0].strip() for c in df.columns]
-    latest = df.iloc[-1].to_dict()
+    try:
+        df.columns = [c.split('(')[0].strip() for c in df.columns]
+        latest = df.iloc[-1].to_dict()
 
-    def _safe(key):
-        v = latest.get(key)
-        return None if v is None or (isinstance(v, float) and math.isnan(v)) else v
+        def _safe(key):
+            v = latest.get(key)
+            return None if v is None or (isinstance(v, float) and math.isnan(v)) else v
 
-    return {
-        "heart_rate":       round(_safe("HeartRate"), 1)          if _safe("HeartRate") is not None else None,
-        "blood_pressure":   f"{int(_safe('SystolicArterialPressure'))}/{int(_safe('DiastolicArterialPressure'))}" if _safe("SystolicArterialPressure") is not None else None,
-        "glucose":          round(_safe("Glucose-BloodConcentration"), 2) if _safe("Glucose-BloodConcentration") is not None else None,
-        "respiration":      round(_safe("RespirationRate"), 1)    if _safe("RespirationRate") is not None else None,
-        "spo2":             round(_safe("OxygenSaturation") * 100, 1)     if _safe("OxygenSaturation") is not None else None,
-        "core_temperature": round(_safe("CoreTemperature"), 2)    if _safe("CoreTemperature") is not None else None,
-        "cardiac_output":   round(_safe("CardiacOutput"), 2)      if _safe("CardiacOutput") is not None else None,
-        # ── Extended Vitals ───────────────────────────────────────────
-        "map":              round(_safe("MeanArterialPressure"), 1) if _safe("MeanArterialPressure") is not None else None,
-        "stroke_volume":    round(_safe("HeartStrokeVolume"), 1)    if _safe("HeartStrokeVolume") is not None else None,
-        "tidal_volume":     round(_safe("TidalVolume"), 1)         if _safe("TidalVolume") is not None else None,
-        "arterial_ph":      round(_safe("ArterialBloodPH"), 2)     if _safe("ArterialBloodPH") is not None else None,
-        "exercise_level":   round(_safe("AchievedExerciseLevel"), 3) if _safe("AchievedExerciseLevel") is not None else None,
-    }
+        # Cache BP values — guard BOTH fields together to prevent int(None)
+        sys_bp = _safe('SystolicArterialPressure')
+        dia_bp = _safe('DiastolicArterialPressure')
+
+        return {
+            "heart_rate":       round(_safe("HeartRate"), 1)           if _safe("HeartRate") is not None else None,
+            "blood_pressure":   f"{int(sys_bp)}/{int(dia_bp)}"         if (sys_bp is not None and dia_bp is not None) else None,
+            "glucose":          round(_safe("Glucose-BloodConcentration"), 2) if _safe("Glucose-BloodConcentration") is not None else None,
+            "respiration":      round(_safe("RespirationRate"), 1)     if _safe("RespirationRate") is not None else None,
+            "spo2":             round(_safe("OxygenSaturation") * 100, 1)      if _safe("OxygenSaturation") is not None else None,
+            "core_temperature": round(_safe("CoreTemperature"), 2)     if _safe("CoreTemperature") is not None else None,
+            "cardiac_output":   round(_safe("CardiacOutput"), 2)       if _safe("CardiacOutput") is not None else None,
+            # ── Extended Vitals ─────────────────────────────────────────
+            "map":              round(_safe("MeanArterialPressure"), 1) if _safe("MeanArterialPressure") is not None else None,
+            "stroke_volume":    round(_safe("HeartStrokeVolume"), 1)   if _safe("HeartStrokeVolume") is not None else None,
+            "tidal_volume":     round(_safe("TidalVolume"), 1)         if _safe("TidalVolume") is not None else None,
+            "arterial_ph":      round(_safe("ArterialBloodPH"), 2)     if _safe("ArterialBloodPH") is not None else None,
+            "exercise_level":   round(_safe("AchievedExerciseLevel"), 3) if _safe("AchievedExerciseLevel") is not None else None,
+        }
+    except Exception as e:
+        logger.error(f"_build_vitals_from_df error: {e}")
+        return {}
 
 
 def _run_batch_sync_blocking(user_id: str, events: list) -> dict:
