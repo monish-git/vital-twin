@@ -1,0 +1,105 @@
+{
+  "expo": {
+    "name": "VitalHealth",
+    "slug": "vitaltwin",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "icon": "./assets/images/icon.png",
+    "scheme": "vitalhealth",
+    "userInterfaceStyle": "automatic",
+    "assetBundlePatterns": [
+      "**/*"
+    ],
+    "owner": "monishks-organization",
+    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.monish2005.vitaltwin",
+      "infoPlist": {
+        "NSCameraUsageDescription": "Allow VitalHealth to access your camera for heart rate measurement.",
+        "NSMicrophoneUsageDescription": "Microphone access may be required by the camera system.",
+        "NSMotionUsageDescription": "Allow VitalHealth to access motion sensors for step counting.",
+        "UIBackgroundModes": [
+          "fetch",
+          "processing",
+          "remote-notification"
+        ]
+      }
+    },
+    "android": {
+      "package": "com.monish2005.vitaltwin",
+      "versionCode": 9,
+      "adaptiveIcon": {
+        "backgroundColor": "#E6F4FE",
+        "foregroundImage": "./assets/images/android-icon-foreground.png"
+      },
+      "permissions": [
+        "CAMERA",
+        "FLASHLIGHT",
+        "ACTIVITY_RECOGNITION",
+        "BODY_SENSORS",
+        "FOREGROUND_SERVICE",
+        "FOREGROUND_SERVICE_HEALTH",
+        "RECEIVE_BOOT_COMPLETED",
+        "WAKE_LOCK",
+        "POST_NOTIFICATIONS",
+        "VIBRATE",
+        "SCHEDULE_EXACT_ALARM",
+        "USE_EXACT_ALARM"
+      ]
+    },
+    "plugins": [
+      "expo-router",
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/images/splash-icon.png",
+          "imageWidth": 200,
+          "resizeMode": "contain",
+          "backgroundColor": "#ffffff"
+        }
+      ],
+      "@react-native-community/datetimepicker",
+      "expo-asset",
+      "expo-sqlite",
+      [
+        "expo-sensors",
+        {
+          "motionPermission": "Allow VitalHealth to access motion sensors for step counting."
+        }
+      ],
+      "expo-task-manager",
+      "expo-background-fetch",
+      [
+        "react-native-vision-camera",
+        {
+          "cameraPermission": "Allow VitalHealth to access your camera for heart rate measurement.",
+          "microphonePermission": "Allow VitalHealth to access your microphone.",
+          "enableFrameProcessors": true
+        }
+      ],
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "extraMavenRepos": [
+              "$rootDir/../node_modules/@notifee/react-native/android/libs"
+            ]
+          }
+        }
+      ],
+      "expo-font",
+      "expo-image",
+      "expo-secure-store",
+      "expo-sharing",
+      "expo-web-browser"
+    ],
+    "experiments": {
+      "typedRoutes": true
+    },
+    "extra": {
+      "eas": {
+        "projectId": "796c9c1f-3894-4a78-b3c9-3645d4ff2087"
+      }
+    }
+  }
+}

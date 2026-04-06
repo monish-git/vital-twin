@@ -1,0 +1,225 @@
+import notifee, { TriggerType } from '@notifee/react-native';
+import AsyncStorage from "@react-native-async-storage/async-storage";
+
+///////////////////////////////////////////////////////////
+// HELPER — Hydration Key
+///////////////////////////////////////////////////////////
+
+const getTodayHydrationKey = (): string => {
+  const d = new Date();
+  return `hydration-${d.getFullYear()}-${d.getMonth()}-${d.getDate()}`;
+};
+
+type Medicine = {
+  id: number;
+  name: string;
+  dose: string;
+  time: string;
+  frequency: string;
+  notificationId?: string;
+};
+
+///////////////////////////////////////////////////////////
+// HELPER — Save Water
+///////////////////////////////////////////////////////////
+
+const addWaterToStorage = async (ml: number): Promise<void> => {
+  try { 
+    const key = getTodayHydrationKey();
+    const saved = await AsyncStorage.getItem(key);
+    const current = saved ? Number(saved) : 0;
+    const newValue = current + ml;
+
+    await AsyncStorage.setItem(key, String(newValue));
+
+    console.log(`💧 [BG] Water saved: ${ml}ml (total: ${newValue}ml)`);
+  } catch (err) {
+    console.log("💧 [BG] Failed to save water:", err);
+  }
+};
+
+///////////////////////////////////////////////////////////
+// 🔥 BACKGROUND EVENT HANDLER (NOTIFEE)
+// Works even when app is killed
+///////////////////////////////////////////////////////////
+
+notifee.onBackgroundEvent(async ({ type, detail }) => {
+  const { notification, pressAction } = detail;
+
+  if (!notification || !pressAction) {
+    console.log("❌ [BG] Missing notification/action");
+    return;
+  }
+
+  const action = pressAction.id;
+  const notificationId = notification.id ?? "";
+
+  const notifData = notification.data as {
+    type?: string;
+    schedule?: string;
+    symptomId?: number;
+    symptomName?: string;
+  };
+
+  console.log("📬 [BG] Action:", action, "| Type:", notifData?.type);
+
+  ///////////////////////////////////////////////////
+  // 💊 MEDICINE ACTIONS
+  ///////////////////////////////////////////////////
+
+  if (notifData?.type === "medicine_reminder") {
+
+    if (action === "MEDICINE_TAKEN") {
+      try {
+        const {
+          getMedicineByNotificationId,
+          markMedicineTakenByNotificationId,
+          deleteMedicineByNotificationId,
+        } = await import("../database/medicineDB");
+
+        const { addToMedicineHistory } =
+          await import("../utils/medicineHistory");
+
+        const medicine = getMedicineByNotificationId(notificationId) as Medicine | null;
+
+        if (medicine) {
+          await addToMedicineHistory({
+            medicineId: medicine.id,
+            medicineName: medicine.name,
+            dose: medicine.dose,
+            time: medicine.time,
+            status: "taken",
+          });
+
+          if (medicine.frequency?.toLowerCase() === "once") {
+            deleteMedicineByNotificationId(notificationId);
+            console.log("💊 [BG] One-time medicine deleted");
+          } else {
+            markMedicineTakenByNotificationId(notificationId);
+            console.log("💊 [BG] Daily medicine marked taken");
+          }
+        }
+
+        await notifee.cancelNotification(notificationId);
+
+        console.log("✅ [BG] MEDICINE_TAKEN handled");
+
+      } catch (e) {
+        console.log("❌ [BG] MEDICINE_TAKEN error:", e);
+      }
+      return;
+    }
+
+    if (action === "MEDICINE_SNOOZE") {
+      try {
+        const body = notification.body ?? "Take your medicine";
+
+        await notifee.createTriggerNotification(
+          {
+            title: "💊 Snoozed Reminder",
+            body,
+            data: { type: "medicine_reminder" },
+            android: {
+              channelId: "health",
+              actions: [
+                { title: "Taken", pressAction: { id: "MEDICINE_TAKEN" } },
+                { title: "Snooze", pressAction: { id: "MEDICINE_SNOOZE" } },
+              ],
+            },
+          },
+          {
+            type: TriggerType.TIMESTAMP,
+            timestamp: Date.now() + 10 * 60 * 1000,
+          }
+        );
+
+        await notifee.cancelNotification(notificationId);
+
+        console.log("⏰ [BG] Medicine snoozed");
+
+      } catch (e) {
+        console.log("❌ [BG] MEDICINE_SNOOZE error:", e);
+      }
+      return;
+    }
+  }
+
+  ///////////////////////////////////////////////////
+  // 💧 HYDRATION ACTIONS
+  ///////////////////////////////////////////////////
+
+  if (notifData?.type === "hydration_reminder") {
+
+    if (action === "HYDRATION_100") {
+      await addWaterToStorage(100);
+      await notifee.cancelNotification(notificationId);
+      console.log("✅ [BG] HYDRATION_100 handled");
+      return;
+    }
+
+    if (action === "HYDRATION_150") {
+      await addWaterToStorage(150);
+      await notifee.cancelNotification(notificationId);
+      console.log("✅ [BG] HYDRATION_150 handled");
+      return;
+    }
+
+    if (action === "HYDRATION_SNOOZE") {
+      try {
+        await notifee.createTriggerNotification(
+          {
+            title: "💧 Snoozed Hydration",
+            body: "Drink water now!",
+            data: { type: "hydration_reminder" },
+            android: {
+              channelId: "health",
+            },
+          },
+          {
+            type: TriggerType.TIMESTAMP,
+            timestamp: Date.now() + 10 * 60 * 1000,
+          }
+        );
+
+        await notifee.cancelNotification(notificationId);
+
+        console.log("⏰ [BG] Hydration snoozed");
+
+      } catch (e) {
+        console.log("❌ [BG] HYDRATION_SNOOZE error:", e);
+      }
+      return;
+    }
+  }
+
+  ///////////////////////////////////////////////////
+  // 🩺 SYMPTOM ACTIONS
+  ///////////////////////////////////////////////////
+
+  if (notifData?.type === "symptom_reminder") {
+
+    if (action === "SYMPTOM_NO" && notifData?.symptomId) {
+      try {
+        const { stopSymptomTracking } =
+          await import("../services/reminderEngine");
+
+        await stopSymptomTracking(notifData.symptomId);
+
+        await notifee.cancelNotification(notificationId);
+
+        console.log("✅ [BG] SYMPTOM_NO handled");
+
+      } catch (e) {
+        console.log("❌ [BG] SYMPTOM_NO error:", e);
+      }
+      return;
+    }
+
+    if (action === "SYMPTOM_YES") {
+      console.log("📬 [BG] SYMPTOM_YES → app will open");
+      return;
+    }
+  }
+
+  console.log("⚠️ [BG] Unhandled action:", action);
+});

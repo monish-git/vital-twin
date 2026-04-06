@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "1049910788509",
+    "project_id": "vitaltwin-78004",
+    "storage_bucket": "vitaltwin-78004.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:1049910788509:android:ddc475543029a3be78af74",
+        "android_client_info": {
+          "package_name": "com.monish2005.vitaltwin"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyCCZXNV-yrEfflOrdHwcPWKR5XsnaLmKg0"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
