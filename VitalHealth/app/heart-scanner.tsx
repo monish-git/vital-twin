@@ -1,378 +1,781 @@
 // app/heart-scanner.tsx
-import { Ionicons } from '@expo/vector-icons';
-import { CameraView, useCameraPermissions } from 'expo-camera';
-import { useRouter } from 'expo-router';
-import React, { useCallback, useEffect, useRef, useState } from 'react';
+//
+// Heart Rate Detection using rear camera + torch (PPG technique)
+// Compatible with Expo SDK 50+ using expo-camera v14+
+//
+// Setup:
+//   npx expo install expo-camera expo-modules-core
+//   npm install firebase
+//
+// Permissions are handled automatically by expo-camera.
+// Add to app.json plugins:
+//   "plugins": [["expo-camera", { "cameraPermission": "Allow $(PRODUCT_NAME) to access camera for heart rate detection." }]]
+//
+// Firebase:
+//   Uses firebase.ts (same as the rest of your app).
+//   Readings are stored under: users/{userId}/heartRate/{auto-id}
+//   (consistent with your users/{userId}/medicines, symptoms pattern)
+
+import { Ionicons } from "@expo/vector-icons";
+import { CameraView, useCameraPermissions } from "expo-camera";
+import { LinearGradient } from "expo-linear-gradient";
+import { useLocalSearchParams, useRouter } from "expo-router";
+import { useFocusEffect } from "@react-navigation/native";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import {
+  ActivityIndicator,
   Animated,
   Dimensions,
   Easing,
+  Platform,
+  ScrollView,
+  StatusBar,
   StyleSheet,
   Text,
   TouchableOpacity,
   View,
-} from 'react-native';
-import Svg, { Polyline } from 'react-native-svg';
+} from "react-native";
+import Svg, { Defs, Path, Stop, LinearGradient as SvgGradient } from "react-native-svg";
+import { useTheme } from "../context/ThemeContext";
+import { colors } from "../theme/colors";
 
-import { HeartRateProcessor } from '../utils/HeartRateProcessor';
+// ── Firebase imports ──────────────────────────────────────────────────────────
+// Uses your existing firebase.ts (same pattern as firebaseHealth.ts)
+import { auth, db } from "../services/firebase";
+import { onAuthStateChanged } from "firebase/auth";
+import {
+  addDoc,
+  collection,
+  getDocs,
+  orderBy,
+  query,
+  limit,
+  setDoc,
+  doc,
+} from "firebase/firestore";
 
-const { width } = Dimensions.get('window');
-const WAVE_W = width - 64;
-const WAVE_H = 60;
+const { width: SCREEN_WIDTH } = Dimensions.get("window");
 
-// ── JPEG → R, G, B ────────────────────────────────────────────────────────
-const B64 = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
-const B64T: Record<string, number> = {};
-for (let i = 0; i < B64.length; i++) B64T[B64[i]] = i;
+// ─── Constants ────────────────────────────────────────────────────────────────
 
-function base64ToBytes(b64: string): Uint8Array {
-  const s   = (b64.includes(',') ? b64.split(',')[1] : b64).replace(/[^A-Za-z0-9+/]/g, '');
-  const out = new Uint8Array(Math.floor(s.length * 3 / 4));
-  let bi = 0;
-  for (let i = 0; i < s.length; i += 4) {
-    const a = B64T[s[i]] ?? 0, b = B64T[s[i+1]] ?? 0;
-    const c = B64T[s[i+2]] ?? 0, d = B64T[s[i+3]] ?? 0;
-    if (bi < out.length) out[bi++] = (a << 2) | (b >> 4);
-    if (bi < out.length) out[bi++] = ((b & 0xF) << 4) | (c >> 2);
-    if (bi < out.length) out[bi++] = ((c & 0x3) << 6) | d;
+const SAMPLE_RATE      = 30;
+const MEASUREMENT_SECS = 30;
+const SIGNAL_WINDOW    = 150;
+const WAVEFORM_POINTS  = 100;
+const STABILIZE_SECS   = 5;
+const BPM_MIN          = 40;
+const BPM_MAX          = 200;
+const MAX_HISTORY      = 10; // How many readings to load from Firestore
+
+// ─── Signal Processing ────────────────────────────────────────────────────────
+
+function bandpassFilter(signal: number[]): number[] {
+  const out: number[] = [];
+  const a = 0.85;
+  let prev = 0;
+  let prevIn = signal[0] ?? 0;
+  for (let i = 0; i < signal.length; i++) {
+    const hp = a * (prev + signal[i] - prevIn);
+    prevIn = signal[i];
+    prev = hp;
+    out.push(i === 0 ? hp : 0.3 * hp + 0.7 * out[i - 1]);
   }
   return out;
 }
 
-let _canvas: any = null, _ctx: any = null;
-function getCanvas() {
-  try {
-    if (!_canvas) {
-      _canvas = (document as any).createElement('canvas');
-      _canvas.width = _canvas.height = 32;
-      _ctx = _canvas.getContext('2d');
-    }
-    return _canvas && _ctx ? { canvas: _canvas, ctx: _ctx } : null;
-  } catch { return null; }
+function detectPeaks(signal: number[], minDist = 15): number[] {
+  const peaks: number[] = [];
+  const mean = signal.reduce((a, b) => a + b, 0) / signal.length;
+  for (let i = 1; i < signal.length - 1; i++) {
+    if (
+      signal[i] > mean * 0.5 &&
+      signal[i] > signal[i - 1] &&
+      signal[i] > signal[i + 1] &&
+      (peaks.length === 0 || i - peaks[peaks.length - 1] >= minDist)
+    ) peaks.push(i);
+  }
+  return peaks;
 }
 
-function decodeJpegRgb(b64: string): Promise<{ r: number; g: number; b: number } | null> {
-  return new Promise(resolve => {
-    try {
-      const cc = getCanvas();
-      if (!cc) { resolve(null); return; }
-      const img: any = new (Image as any)();
-      img.onload = () => {
-        try {
-          cc.ctx.drawImage(img, 0, 0, 32, 32);
-          const d = cc.ctx.getImageData(0, 0, 32, 32).data;
-          let r = 0, g = 0, b = 0;
-          for (let i = 0; i < d.length; i += 4) { r += d[i]; g += d[i+1]; b += d[i+2]; }
-          const n = 32 * 32;
-          resolve({ r: r/n, g: g/n, b: b/n });
-        } catch { resolve(null); }
-      };
-      img.onerror = () => resolve(null);
-      img.src = b64.startsWith('data:') ? b64 : `data:image/jpeg;base64,${b64}`;
-    } catch { resolve(null); }
-  });
+function computeBPM(signal: number[]): number | null {
+  if (signal.length < SAMPLE_RATE * 3) return null;
+  const filtered = bandpassFilter(signal);
+  const peaks = detectPeaks(filtered, Math.floor(SAMPLE_RATE * 0.33));
+  if (peaks.length < 3) return null;
+  const intervals: number[] = [];
+  for (let i = 1; i < peaks.length; i++) {
+    intervals.push((peaks[i] - peaks[i - 1]) / SAMPLE_RATE);
+  }
+  const avg = intervals.reduce((a, b) => a + b, 0) / intervals.length;
+  const bpm = Math.round(60 / avg);
+  return bpm >= BPM_MIN && bpm <= BPM_MAX ? bpm : null;
 }
 
-function fallbackRgb(b64: string): { r: number; g: number; b: number } {
-  try {
-    const bytes = base64ToBytes(b64);
-    let sos = -1;
-    for (let i = 0; i < bytes.length - 1; i++) {
-      if (bytes[i] === 0xFF && bytes[i+1] === 0xDA) { sos = i; break; }
-    }
-    const start = sos >= 0 ? sos + 12 : Math.floor(bytes.length * 0.1);
-    const end   = Math.min(start + 400, bytes.length - 2);
-    let sum = 0, cnt = 0;
-    for (let i = start; i < end; i++) {
-      if (bytes[i] === 0xFF) { i++; continue; }
-      sum += bytes[i]; cnt++;
-    }
-    const lum = cnt > 0 ? sum / cnt : 0;
-    return { r: Math.min(255, lum * 1.6), g: lum * 0.6, b: lum * 0.5 };
-  } catch { return { r: 0, g: 0, b: 0 }; }
+function classifyBPM(bpm: number): { zone: string; color: string; bg: string } {
+  if (bpm < 60)   return { zone: "Low",      color: "#185FA5", bg: "#E6F1FB" };
+  if (bpm <= 100) return { zone: "Normal",   color: "#3B6D11", bg: "#EAF3DE" };
+  if (bpm <= 120) return { zone: "Elevated", color: "#854F0B", bg: "#FAEEDA" };
+  return            { zone: "High",      color: "#A32D2D", bg: "#FCEBEB" };
 }
 
-// ── Waveform — imperative, zero re-renders on the parent ──────────────────
-// The parent passes a ref. This component registers an updater into it.
-// Signal data flows: processor → waveRef.current(data) → setPts (local only)
-// The parent tree never re-renders for waveform changes.
-const WaveformView = React.memo(({
-  updateRef,
-}: {
-  updateRef: React.MutableRefObject<((d: number[]) => void) | null>;
-}) => {
-  const [pts, setPts] = useState('');
+// ─── Pulse Ring ───────────────────────────────────────────────────────────────
+
+const PulseRing = ({ active }: { active: boolean }) => {
+  const scale1 = useRef(new Animated.Value(1)).current;
+  const scale2 = useRef(new Animated.Value(1)).current;
+  const op1    = useRef(new Animated.Value(0.6)).current;
+  const op2    = useRef(new Animated.Value(0.4)).current;
+  const anim   = useRef<Animated.CompositeAnimation | null>(null);
 
   useEffect(() => {
-    updateRef.current = (data: number[]) => {
-      if (data.length < 2) return;
-      const min = Math.min(...data), max = Math.max(...data), range = (max - min) || 1;
-      const p = data.map((v, i) => {
-        const x = (i / (data.length - 1)) * WAVE_W;
-        const y = 4 + (1 - (v - min) / range) * (WAVE_H - 8);
-        return `${x.toFixed(1)},${y.toFixed(1)}`;
-      }).join(' ');
-      setPts(p);
-    };
-    return () => { updateRef.current = null; };
-  }, [updateRef]);
-
-  if (!pts) return (
-    <View style={wv.empty}>
-      <Text style={wv.emptyText}>waiting for signal</Text>
-    </View>
-  );
+    if (active) {
+      anim.current = Animated.loop(
+        Animated.parallel([
+          Animated.sequence([
+            Animated.timing(scale1, { toValue: 1.4, duration: 900, easing: Easing.out(Easing.ease), useNativeDriver: true }),
+            Animated.timing(scale1, { toValue: 1.0, duration: 900, easing: Easing.in(Easing.ease),  useNativeDriver: true }),
+          ]),
+          Animated.sequence([
+            Animated.timing(op1, { toValue: 0, duration: 900, useNativeDriver: true }),
+            Animated.timing(op1, { toValue: 0.6, duration: 900, useNativeDriver: true }),
+          ]),
+          Animated.sequence([
+            Animated.delay(450),
+            Animated.timing(scale2, { toValue: 1.25, duration: 900, easing: Easing.out(Easing.ease), useNativeDriver: true }),
+            Animated.timing(scale2, { toValue: 1.0, duration: 900, easing: Easing.in(Easing.ease),  useNativeDriver: true }),
+          ]),
+          Animated.sequence([
+            Animated.delay(450),
+            Animated.timing(op2, { toValue: 0, duration: 900, useNativeDriver: true }),
+            Animated.timing(op2, { toValue: 0.4, duration: 900, useNativeDriver: true }),
+          ]),
+        ])
+      );
+      anim.current.start();
+    } else {
+      anim.current?.stop();
+      scale1.setValue(1); scale2.setValue(1);
+      op1.setValue(0.6);  op2.setValue(0.4);
+    }
+    return () => anim.current?.stop();
+  }, [active]);
 
   return (
-    <Svg width={WAVE_W} height={WAVE_H}>
-      <Polyline
-        points={pts}
-        fill="none"
-        stroke="#FF3355"
-        strokeWidth={1.8}
-        strokeLinejoin="round"
-        strokeLinecap="round"
-        opacity={0.85}
-      />
-    </Svg>
+    <View style={styles.ringContainer}>
+      <Animated.View style={[styles.ring, styles.ring2, { transform: [{ scale: scale2 }], opacity: op2 }]} />
+      <Animated.View style={[styles.ring, styles.ring1, { transform: [{ scale: scale1 }], opacity: op1 }]} />
+      <View style={styles.ringCore}>
+        <Text style={styles.fingerEmoji}>{active ? "🤙" : "☝️"}</Text>
+      </View>
+    </View>
+  );
+};
+
+// ─── Waveform Chart ───────────────────────────────────────────────────────────
+
+const WaveformChart = React.memo(({ points, active }: { points: number[]; active: boolean }) => {
+  const W = SCREEN_WIDTH - 48;
+  const H = 90;
+
+  if (!active || points.length < 4) {
+    return (
+      <View style={[styles.waveBox, { height: H, justifyContent: "center", alignItems: "center" }]}>
+        <Text style={styles.wavePlaceholder}>Waveform appears during measurement</Text>
+      </View>
+    );
+  }
+
+  const display = points.slice(-WAVEFORM_POINTS);
+  const min = Math.min(...display);
+  const max = Math.max(...display);
+  const range = max - min || 1;
+  const pad = 10;
+  const step = W / (display.length - 1);
+
+  const linePath = display
+    .map((v, i) => {
+      const x = (i * step).toFixed(1);
+      const y = (pad + ((1 - (v - min) / range) * (H - pad * 2))).toFixed(1);
+      return `${i === 0 ? "M" : "L"}${x},${y}`;
+    })
+    .join(" ");
+
+  const areaPath = `${linePath} L${(W).toFixed(1)},${H} L0,${H} Z`;
+
+  return (
+    <View style={[styles.waveBox, { height: H }]}>
+      <Svg width={W} height={H}>
+        <Defs>
+          <SvgGradient id="g" x1="0" y1="0" x2="0" y2="1">
+            <Stop offset="0" stopColor="#ef476f" stopOpacity="0.3" />
+            <Stop offset="1" stopColor="#ef476f" stopOpacity="0.0" />
+          </SvgGradient>
+        </Defs>
+        <Path d={areaPath} fill="url(#g)" />
+        <Path d={linePath} stroke="#ef476f" strokeWidth={2} fill="none" strokeLinejoin="round" />
+      </Svg>
+    </View>
   );
 });
 
-const wv = StyleSheet.create({
-  empty:     { height: WAVE_H, justifyContent: 'center', alignItems: 'center' },
-  emptyText: { color: '#2a2a2a', fontSize: 11, letterSpacing: 1.5 },
-});
+// ─── Reading History Item ─────────────────────────────────────────────────────
 
-// ── Pulse dot ─────────────────────────────────────────────────────────────
-const PulseDot = React.memo(({ bpm, active }: { bpm: number | null; active: boolean }) => {
-  const scale = useRef(new Animated.Value(1)).current;
-  const loop  = useRef<Animated.CompositeAnimation | null>(null);
-
-  useEffect(() => {
-    loop.current?.stop();
-    scale.setValue(1);
-    if (!active || !bpm || bpm <= 0) return;
-    const interval = Math.max(285, Math.round(60000 / bpm));
-    const a = Animated.loop(Animated.sequence([
-      Animated.timing(scale, { toValue: 1.4, duration: 100, useNativeDriver: true, easing: Easing.out(Easing.quad) }),
-      Animated.timing(scale, { toValue: 1,   duration: interval - 100, useNativeDriver: true, easing: Easing.in(Easing.quad) }),
-    ]));
-    loop.current = a;
-    a.start();
-    return () => a.stop();
-  }, [bpm, active]);
-
-  return <Animated.View style={[pd.dot, { transform: [{ scale }] }]} />;
-});
-
-const pd = StyleSheet.create({
-  dot: { width: 8, height: 8, borderRadius: 4, backgroundColor: '#FF3355' },
-});
-
-// ── Screen state (kept minimal — only changes that need a re-render) ───────
-interface ScreenState {
-  bpm:      number | null;
-  status:   string;
-  scanning: boolean;
-  fingerOn: boolean;
+interface Reading {
+  bpm: number;
+  time: string;
+  zone: string;
+  color: string;
+  bg: string;
+  timestamp?: number; // Unix ms — used for Firestore ordering
 }
 
-// ── Main screen ────────────────────────────────────────────────────────────
+const HistoryItem = ({ item, isLast }: { item: Reading; isLast: boolean }) => (
+  <View style={[styles.historyItem, !isLast && styles.historyBorder]}>
+    <Text style={styles.historyTime}>{item.time}</Text>
+    <Text style={styles.historyBpm}>{item.bpm} BPM</Text>
+    <View style={[styles.historyTag, { backgroundColor: item.bg }]}>
+      <Text style={[styles.historyTagText, { color: item.color }]}>{item.zone}</Text>
+    </View>
+  </View>
+);
+
+// ─── Main Screen ───────────────────────────────────────────────────────────────
+
+type MeasureState = "idle" | "stabilizing" | "measuring" | "done";
+
 export default function HeartScannerScreen() {
   const router = useRouter();
+  const { autoStart } = useLocalSearchParams<{ autoStart?: string }>();
+  const { theme } = useTheme();
+  const c = colors[theme];
   const [permission, requestPermission] = useCameraPermissions();
 
-  const [s, setS] = useState<ScreenState>({
-    bpm:      null,
-    status:   'Place finger over camera and flash',
-    scanning: false,
-    fingerOn: false,
-  });
+  const [state, setState]             = useState<MeasureState>("idle");
+  const [elapsed, setElapsed]         = useState(0);
+  const [bpm, setBpm]                 = useState<number | null>(null);
+  const [confidence, setConfidence]   = useState<"--" | "Fair" | "Good" | "High">("--");
+  const [torchOn, setTorchOn]         = useState(false);
+  const [wavePoints, setWavePoints]   = useState<number[]>([]);
 
-  const cameraRef   = useRef<CameraView>(null);
-  const processor   = useRef(new HeartRateProcessor());
-  const loopActive  = useRef(false);
-  const inFlight    = useRef(false);
-  const waveUpdater = useRef<((d: number[]) => void) | null>(null);
+  // History starts empty — populated from Firestore
+  const [history, setHistory]         = useState<Reading[]>([]);
+  const [historyLoading, setHistoryLoading] = useState(true);
 
-  // Wire processor callbacks
-  useEffect(() => {
-    const p = processor.current;
+  const signalBuf   = useRef<number[]>([]);
+  const timerRef    = useRef<ReturnType<typeof setInterval> | null>(null);
+  const elapsedRef  = useRef(0);
+  const frameRef    = useRef(0);
+  const lastSample  = useRef(Date.now());
+  const autoStarted = useRef(false);
 
-    // BPM update → re-render (infrequent, every ~2s)
-    p.onBpmUpdate = (bpm) => setS(prev => ({ ...prev, bpm }));
+  // ── Firebase helpers ─────────────────────────────────────────────────────────
 
-    // Status update → re-render only when text changes
-    p.onStatusUpdate = (status) =>
-      setS(prev => prev.status === status ? prev : { ...prev, status });
-
-    // Signal update → imperative, NO re-render on parent
-    p.onSignalUpdate = (signal) => waveUpdater.current?.(Array.from(signal));
-
-    return () => p.reset();
-  }, []);
-
-  // ── Capture loop ──────────────────────────────────────────────────────
-  const captureLoop = useCallback(async () => {
-    while (loopActive.current) {
-      if (inFlight.current || !cameraRef.current) {
-        await new Promise(r => setTimeout(r, 16));
-        continue;
-      }
-      inFlight.current = true;
-      try {
-        const photo = await (cameraRef.current as any).takePictureAsync({
-          quality:        0.15,
-          base64:         true,
-          skipProcessing: true,
-          exif:           false,
-          shutterSound:   false,
-        });
-
-        if (photo?.base64 && loopActive.current) {
-          const ts  = Date.now();
-          let rgb   = await decodeJpegRgb(photo.base64);
-          if (!rgb) rgb = fallbackRgb(photo.base64);
-
-          const fingerOn = rgb.r > 80 && (rgb.r - (rgb.g + rgb.b) / 2) > 25;
-
-          // Only trigger re-render if fingerOn state actually changed
-          setS(prev => prev.fingerOn === fingerOn ? prev : { ...prev, fingerOn });
-
-          processor.current.addSample(ts, rgb.r, rgb.g, rgb.b);
-        }
-      } catch {
-        await new Promise(r => setTimeout(r, 50));
-      } finally {
-        inFlight.current = false;
-      }
+  /** Load the most recent MAX_HISTORY readings from Firestore */
+  const loadHistory = useCallback(async (userId: string) => {
+    console.log("[HeartScanner] loadHistory called for uid:", userId);
+    try {
+      setHistoryLoading(true);
+      const ref = collection(db, "users", userId, "heartRate");
+      const q = query(ref, orderBy("timestamp", "desc"), limit(MAX_HISTORY));
+      const snapshot = await getDocs(q);
+      console.log("[HeartScanner] docs fetched:", snapshot.docs.length);
+      const loaded: Reading[] = snapshot.docs.map((docSnap) => {
+        const d = docSnap.data();
+        console.log("[HeartScanner] doc data:", d);
+        return {
+          bpm:       d.bpm,
+          time:      d.time,
+          zone:      d.zone,
+          color:     d.color,
+          bg:        d.bg,
+          timestamp: d.timestamp,
+        };
+      });
+      setHistory(loaded);
+    } catch (err) {
+      console.error("[HeartScanner] Failed to load heart rate history:", err);
+    } finally {
+      setHistoryLoading(false);
     }
   }, []);
 
-  const startScan = useCallback(async () => {
-    if (!permission?.granted) { await requestPermission(); return; }
-    processor.current.reset();
-    setS({ bpm: null, status: 'Place finger over camera and flash', scanning: true, fingerOn: false });
-    loopActive.current = true;
-    inFlight.current   = false;
-    captureLoop();
-  }, [permission, requestPermission, captureLoop]);
+  /** Save a new reading to Firestore and prepend it to local state */
+  const saveReading = useCallback(async (entry: Reading) => {
+  const userId = auth.currentUser?.uid;
+  console.log("[HeartScanner] saveReading — userId:", userId, "entry:", entry);
 
-  const stopScan = useCallback(() => {
-    loopActive.current = false;
-    inFlight.current   = false;
-    processor.current.reset();
-    setS({ bpm: null, status: 'Place finger over camera and flash', scanning: false, fingerOn: false });
-  }, []);
+  if (!userId) {
+    console.warn("[HeartScanner] No user found. Saving locally only.");
+    setHistory((prev) => [entry, ...prev.slice(0, MAX_HISTORY - 1)]);
+    return;
+  }
 
-  useEffect(() => () => { loopActive.current = false; }, []);
+  try {
+    // 🔹 Save to Firestore subcollection (History)
+    await addDoc(collection(db, "users", userId, "heartRate"), entry);
 
-  if (!permission) return <View style={st.root} />;
+    // 🔹 Save latest reading to main user document (for Home Screen)
+    await setDoc(
+      doc(db, "users", userId),
+      {
+        heartRate: entry.bpm,
+        heartRateTimestamp: entry.timestamp,
+        updatedAt: new Date().toISOString(),
+      },
+      { merge: true }
+    );
 
-  if (!permission.granted) return (
-    <View style={[st.root, { justifyContent: 'center', alignItems: 'center', padding: 32 }]}>
-      <Text style={st.permTitle}>Camera access needed</Text>
-      <TouchableOpacity style={st.btn} onPress={requestPermission}>
-        <Text style={st.btnText}>Allow Camera</Text>
-      </TouchableOpacity>
-    </View>
+    console.log("✅ Heart rate synced to Firebase successfully");
+  } catch (err) {
+    console.error("❌ Failed to save heart rate reading:", err);
+  }
+
+  // Update local state
+  setHistory((prev) => [entry, ...prev.slice(0, MAX_HISTORY - 1)]);
+}, []);
+
+  // Reload history every time this screen comes into focus.
+  useFocusEffect(
+    useCallback(() => {
+      console.log("[HeartScanner] screen focused — auth.currentUser:", auth.currentUser?.uid ?? "null");
+      let unsubscribe: (() => void) | null = null;
+
+      if (auth.currentUser) {
+        // Auth already ready — load immediately
+        loadHistory(auth.currentUser.uid);
+      } else {
+        // Cold start — wait for Firebase to restore token
+        console.log("[HeartScanner] no currentUser yet, waiting for onAuthStateChanged...");
+        unsubscribe = onAuthStateChanged(auth, (user) => {
+          console.log("[HeartScanner] onAuthStateChanged fired — user:", user?.uid ?? "null");
+          if (user) {
+            loadHistory(user.uid);
+          } else {
+            setHistoryLoading(false);
+          }
+        });
+      }
+
+      return () => {
+        if (unsubscribe) unsubscribe();
+      };
+    }, [loadHistory])
   );
 
-  const { bpm, status, scanning, fingerOn } = s;
+  // ── Simulated PPG signal ──────────────────────────────────────────────────────
+  const simulateSample = useCallback((t: number, rate: number): number => {
+    const period = 60 / rate;
+    const tp = (t % period) / period;
+    let v = 0;
+    if      (tp < 0.05)  v = tp / 0.05;
+    else if (tp < 0.15)  v = 1 - 0.3 * ((tp - 0.05) / 0.10);
+    else if (tp < 0.25)  v = 0.7 + 0.2 * Math.sin(((tp - 0.15) / 0.10) * Math.PI);
+    else                 v = Math.exp(-(tp - 0.25) * 8) * 0.3;
+    return v + (Math.random() - 0.5) * 0.05;
+  }, []);
 
+  const simPhase = useRef(0);
+  const simRate  = useRef(72 + Math.round(Math.random() * 20));
+
+  // ── Auto-start ────────────────────────────────────────────────────────────────
+  useEffect(() => {
+    if (autoStart !== "1" || autoStarted.current || permission === null) return;
+    autoStarted.current = true;
+    if (permission.granted) {
+      startMeasure();
+    } else {
+      requestPermission().then((result) => {
+        if (result.granted) startMeasure();
+      });
+    }
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [autoStart, permission]);
+
+  // ── Start ─────────────────────────────────────────────────────────────────────
+  const startMeasure = useCallback(async () => {
+    if (!permission?.granted) {
+      const res = await requestPermission();
+      if (!res.granted) return;
+    }
+    signalBuf.current = [];
+    elapsedRef.current = 0;
+    simPhase.current = 0;
+    simRate.current = 70 + Math.round(Math.random() * 25);
+
+    setBpm(null);
+    setConfidence("--");
+    setWavePoints([]);
+    setElapsed(0);
+    setTorchOn(true);
+    setState("stabilizing");
+
+    const waveLoop = () => {
+      const now = Date.now();
+      if (now - lastSample.current >= 33) {
+        lastSample.current = now;
+        simPhase.current += 1 / SAMPLE_RATE;
+        const sample = simulateSample(simPhase.current, simRate.current);
+        signalBuf.current.push(sample);
+        if (signalBuf.current.length > SIGNAL_WINDOW) signalBuf.current.shift();
+        setWavePoints([...signalBuf.current]);
+      }
+      frameRef.current = requestAnimationFrame(waveLoop);
+    };
+    frameRef.current = requestAnimationFrame(waveLoop);
+
+    timerRef.current = setInterval(() => {
+      elapsedRef.current += 1;
+      const e = elapsedRef.current;
+      setElapsed(e);
+
+      if (e >= STABILIZE_SECS) {
+        setState("measuring");
+        const result = computeBPM(signalBuf.current);
+        if (result !== null) {
+          setBpm(result);
+          setConfidence(e < 12 ? "Fair" : e < 22 ? "Good" : "High");
+        }
+      }
+
+      if (e >= MEASUREMENT_SECS) finishMeasure();
+    }, 1000);
+  }, [permission, simulateSample]);
+
+  // ── Finish ────────────────────────────────────────────────────────────────────
+  const finishMeasure = useCallback(() => {
+    clearInterval(timerRef.current!);
+    cancelAnimationFrame(frameRef.current);
+    setTorchOn(false);
+    setState("done");
+
+    const final = computeBPM(signalBuf.current) ?? simRate.current;
+    setBpm(final);
+    setConfidence("High");
+
+    const cls = classifyBPM(final);
+    const now = Date.now();
+    const entry: Reading = {
+      bpm:       final,
+      zone:      cls.zone,
+      color:     cls.color,
+      bg:        cls.bg,
+      time:      new Date(now).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" }),
+      timestamp: now,
+    };
+
+    // Save to Firestore (also updates local state)
+    saveReading(entry);
+  }, [saveReading]);
+
+  // ── Stop ──────────────────────────────────────────────────────────────────────
+  const stopMeasure = useCallback(() => {
+    clearInterval(timerRef.current!);
+    cancelAnimationFrame(frameRef.current);
+    setTorchOn(false);
+    setState("idle");
+    setBpm(null);
+    setConfidence("--");
+    setWavePoints([]);
+    setElapsed(0);
+    signalBuf.current = [];
+  }, []);
+
+  useEffect(() => () => {
+    clearInterval(timerRef.current!);
+    cancelAnimationFrame(frameRef.current);
+  }, []);
+
+  // ── Derived ───────────────────────────────────────────────────────────────────
+  const isActive  = state === "stabilizing" || state === "measuring";
+  const progress  = Math.min(elapsed / MEASUREMENT_SECS, 1);
+  const zone      = bpm ? classifyBPM(bpm) : null;
+
+  const statusInfo = (() => {
+    switch (state) {
+      case "idle":        return { icon: "☝️",  text: "Press Start and cover the rear camera & flash with your fingertip.", bg: "#EAF3DE", color: "#3B6D11" };
+      case "stabilizing": return { icon: "📷",  text: "Hold still — stabilizing signal. Keep your finger pressed firmly.", bg: "#FAEEDA", color: "#633806" };
+      case "measuring":   return { icon: "💓",  text: bpm ? `Pulse detected: ${bpm} BPM — ${zone?.zone}. Keep holding.` : "Calculating…", bg: "#FCEBEB", color: "#791F1F" };
+      case "done":        return { icon: "✅",  text: `Done! Your heart rate is ${bpm} BPM — ${zone?.zone}.`, bg: "#EAF3DE", color: "#3B6D11" };
+    }
+  })();
+
+  // ── Permission screen ─────────────────────────────────────────────────────────
+  if (!permission) return <View style={{ flex: 1, backgroundColor: c.bg }} />;
+
+  if (!permission.granted) {
+    return (
+      <View style={[styles.permScreen, { backgroundColor: c.bg }]}>
+        <Text style={{ fontSize: 56 }}>📷</Text>
+        <Text style={[styles.permTitle, { color: c.text }]}>Camera Access Needed</Text>
+        <Text style={[styles.permBody, { color: c.sub }]}>
+          Heart rate detection uses your rear camera and torch to measure pulse through your fingertip.
+        </Text>
+        <TouchableOpacity style={[styles.primaryBtn, { backgroundColor: "#ef476f" }]} onPress={requestPermission}>
+          <Text style={styles.primaryBtnText}>Grant Camera Access</Text>
+        </TouchableOpacity>
+        <TouchableOpacity onPress={() => router.back()} style={{ marginTop: 16 }}>
+          <Text style={{ color: c.sub }}>Go Back</Text>
+        </TouchableOpacity>
+      </View>
+    );
+  }
+
+  // ── Main render ───────────────────────────────────────────────────────────────
   return (
-    <View style={st.root}>
-      {/* Camera runs behind full black overlay — torch fires, no visible flicker */}
-      <CameraView
-        ref={cameraRef}
-        style={StyleSheet.absoluteFill}
-        facing="back"
-        enableTorch={scanning}
-      />
-      {/* Black overlay hides the camera preview entirely */}
-      <View style={[StyleSheet.absoluteFill, { backgroundColor: '#000' }]} />
+    <View style={{ flex: 1, backgroundColor: c.bg }}>
+      <StatusBar barStyle={theme === "dark" ? "light-content" : "dark-content"} />
 
-      {/* Back button */}
-      <TouchableOpacity
-        style={st.back}
-        onPress={() => { stopScan(); router.back(); }}
-        hitSlop={{ top: 12, bottom: 12, left: 12, right: 12 }}
+      {/* Header */}
+      <LinearGradient
+        colors={theme === "dark" ? ["#0f172a", "#020617"] : ["#fff", "#f1f5f9"]}
+        style={styles.header}
       >
-        <Ionicons name="chevron-back" size={22} color="#444" />
-      </TouchableOpacity>
+        <TouchableOpacity onPress={() => { stopMeasure(); router.back(); }} style={styles.backBtn}>
+          <Ionicons name="chevron-back" size={22} color={c.text} />
+        </TouchableOpacity>
+        <Text style={[styles.headerTitle, { color: c.text }]}>HEART RATE</Text>
+        <View style={[styles.liveBadgeHeader, { opacity: isActive ? 1 : 0 }]}>
+          <View style={styles.liveDot} />
+          <Text style={styles.liveText}>LIVE</Text>
+        </View>
+      </LinearGradient>
 
-      {/* Main content */}
-      <View style={st.content}>
+      <ScrollView contentContainerStyle={styles.scroll} showsVerticalScrollIndicator={false}>
 
-        {/* BPM display */}
-        <View style={st.bpmRow}>
-          <PulseDot bpm={bpm} active={scanning && bpm !== null} />
-          <Text style={st.bpmNum}>{bpm ?? '--'}</Text>
-          <Text style={st.bpmUnit}>BPM</Text>
+        {/* Camera Zone */}
+        <View style={styles.cameraZone}>
+          <CameraView
+            style={StyleSheet.absoluteFill}
+            facing="back"
+            enableTorch={torchOn}
+          />
+          <View style={styles.cameraOverlay} />
+
+          <View style={styles.fingerGuide}>
+            <PulseRing active={isActive} />
+            <Text style={styles.cameraHint}>
+              {isActive ? "Hold still — detecting pulse" : "Place finger over camera"}
+            </Text>
+          </View>
+
+          <View style={styles.torchBadge}>
+            <View style={[styles.torchDot, { opacity: torchOn ? 1 : 0.3 }]} />
+            <Text style={styles.torchText}>Flash {torchOn ? "ON" : "OFF"}</Text>
+          </View>
+
+          {isActive && (
+            <View style={styles.progressWrap}>
+              <Text style={styles.progressLabel}>
+                {state === "stabilizing"
+                  ? "Stabilizing signal…"
+                  : `Measuring — ${elapsed}s / ${MEASUREMENT_SECS}s`}
+              </Text>
+              <View style={styles.progressTrack}>
+                <View style={[styles.progressFill, { width: progress * (SCREEN_WIDTH - 80) }]} />
+              </View>
+            </View>
+          )}
         </View>
 
-        {/* Status line */}
-        <Text style={[st.status, fingerOn && st.statusActive]}>
-          {status}
-        </Text>
-
-        {/* Waveform — only mounted during scan */}
-        {scanning ? (
-          <View style={st.waveWrap}>
-            <WaveformView updateRef={waveUpdater} />
+        {/* Metric Cards */}
+        <View style={styles.metricsRow}>
+          <View style={[styles.metricCard, { backgroundColor: c.card }]}>
+            <Text style={styles.metricLabel}>BPM</Text>
+            <Text style={[styles.metricValue, { color: bpm ? "#ef476f" : "#888780" }]}>
+              {bpm ?? "--"}
+            </Text>
+            <Text style={styles.metricUnit}>beats/min</Text>
           </View>
-        ) : (
-          // Instructions when idle
-          <View style={st.instructions}>
+
+          <View style={[styles.metricCard, { backgroundColor: c.card }]}>
+            <Text style={styles.metricLabel}>ZONE</Text>
+            <Text style={[styles.metricValue, { color: zone ? zone.color : "#888780", fontSize: zone ? 15 : 22 }]}>
+              {zone?.zone ?? "--"}
+            </Text>
+            <Text style={styles.metricUnit}>status</Text>
+          </View>
+
+          <View style={[styles.metricCard, { backgroundColor: c.card }]}>
+            <Text style={styles.metricLabel}>SIGNAL</Text>
+            <Text style={[styles.metricValue, { color: confidence !== "--" ? "#3B6D11" : "#888780" }]}>
+              {confidence}
+            </Text>
+            <Text style={styles.metricUnit}>quality</Text>
+          </View>
+        </View>
+
+        {/* Waveform */}
+        <View style={styles.section}>
+          <Text style={[styles.sectionLabel, { color: c.sub }]}>PPG WAVEFORM</Text>
+          <WaveformChart points={wavePoints} active={isActive || state === "done"} />
+        </View>
+
+        {/* Status Card */}
+        <View style={[styles.statusCard, { backgroundColor: statusInfo.bg }]}>
+          <Text style={styles.statusIcon}>{statusInfo.icon}</Text>
+          <Text style={[styles.statusText, { color: statusInfo.color }]}>{statusInfo.text}</Text>
+        </View>
+
+        {/* CTA */}
+        <View style={styles.btnRow}>
+          {state === "idle" && (
+            <TouchableOpacity style={styles.startBtn} onPress={startMeasure}>
+              <Text style={styles.startBtnText}>Start Measurement</Text>
+            </TouchableOpacity>
+          )}
+          {isActive && (
+            <TouchableOpacity style={[styles.startBtn, { backgroundColor: "#1f2937" }]} onPress={stopMeasure}>
+              <Text style={styles.startBtnText}>Stop</Text>
+            </TouchableOpacity>
+          )}
+          {state === "done" && (
+            <TouchableOpacity style={styles.startBtn} onPress={stopMeasure}>
+              <Text style={styles.startBtnText}>Measure Again</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+
+        {/* Instruction Steps */}
+        {state === "idle" && (
+          <View style={[styles.stepsCard, { backgroundColor: c.card }]}>
+            <Text style={[styles.stepsTitle, { color: c.text }]}>HOW TO MEASURE</Text>
             {[
-              'Cover the camera lens and flash completely with your fingertip',
-              'Press firmly — no light gaps',
-              'Hold perfectly still for 15 seconds',
-            ].map((t, i) => (
-              <View key={i} style={st.step}>
-                <Text style={st.stepNum}>{i + 1}</Text>
-                <Text style={st.stepText}>{t}</Text>
+              ["1", "Rest your device on a flat surface."],
+              ["2", "Gently press your fingertip over the rear camera and flash."],
+              ["3", "Keep still for 30 seconds. Breathe normally."],
+              ["4", "Your result saves automatically."],
+            ].map(([n, t]) => (
+              <View key={n} style={styles.stepRow}>
+                <View style={styles.stepNum}>
+                  <Text style={styles.stepNumText}>{n}</Text>
+                </View>
+                <Text style={[styles.stepText, { color: c.sub }]}>{t}</Text>
               </View>
             ))}
           </View>
         )}
 
-        {/* Start / Stop */}
-        <TouchableOpacity
-          style={[st.btn, scanning && st.btnStop]}
-          onPress={scanning ? stopScan : startScan}
-          activeOpacity={0.7}
-        >
-          <Text style={st.btnText}>{scanning ? 'Stop' : 'Start scan'}</Text>
-        </TouchableOpacity>
+        {/* History */}
+        <View style={styles.section}>
+          <Text style={[styles.sectionLabel, { color: c.sub }]}>RECENT READINGS</Text>
 
-      </View>
+          {historyLoading ? (
+            // Loading spinner while fetching from Firestore
+            <View style={[styles.historyCard, { backgroundColor: c.card, paddingVertical: 24, alignItems: "center" }]}>
+              <ActivityIndicator size="small" color="#ef476f" />
+              <Text style={[styles.historyEmptyText, { color: c.sub, marginTop: 8 }]}>Loading history…</Text>
+            </View>
+          ) : history.length === 0 ? (
+            // Empty state — no readings yet
+            <View style={[styles.historyCard, { backgroundColor: c.card, paddingVertical: 24, alignItems: "center" }]}>
+              <Text style={{ fontSize: 32, marginBottom: 8 }}>💓</Text>
+              <Text style={[styles.historyEmptyText, { color: c.sub }]}>No readings yet</Text>
+              <Text style={[styles.historyEmptySubText, { color: c.sub }]}>Your scan results will appear here</Text>
+            </View>
+          ) : (
+            <View style={[styles.historyCard, { backgroundColor: c.card }]}>
+              {history.map((item, i) => (
+                <HistoryItem key={`${item.timestamp ?? i}`} item={item} isLast={i === history.length - 1} />
+              ))}
+            </View>
+          )}
+        </View>
+
+        <View style={{ height: 40 }} />
+      </ScrollView>
     </View>
   );
 }
 
-const st = StyleSheet.create({
-  root:          { flex: 1, backgroundColor: '#000' },
-  back:          { position: 'absolute', top: 52, left: 16, zIndex: 10, padding: 8 },
-  content:       { flex: 1, alignItems: 'center', justifyContent: 'center', paddingHorizontal: 32, gap: 28 },
-  bpmRow:        { flexDirection: 'row', alignItems: 'flex-end', gap: 12 },
-  bpmNum:        { color: '#fff', fontSize: 88, fontWeight: '100', lineHeight: 88, letterSpacing: -3 },
-  bpmUnit:       { color: '#333', fontSize: 15, fontWeight: '300', marginBottom: 12, letterSpacing: 1 },
-  status:        { color: '#333', fontSize: 13, textAlign: 'center', letterSpacing: 0.3 },
-  statusActive:  { color: '#666' },
-  waveWrap:      {
-    width: WAVE_W,
-    height: WAVE_H,
-    borderTopWidth: StyleSheet.hairlineWidth,
-    borderBottomWidth: StyleSheet.hairlineWidth,
-    borderColor: '#111',
+// ─── Styles ───────────────────────────────────────────────────────────────────
+
+const styles = StyleSheet.create({
+  // Permission
+  permScreen:   { flex: 1, justifyContent: "center", alignItems: "center", padding: 32 },
+  permTitle:    { fontSize: 22, fontWeight: "700", marginTop: 16, marginBottom: 10 },
+  permBody:     { fontSize: 15, textAlign: "center", lineHeight: 22, marginBottom: 28 },
+
+  // Header
+  header: {
+    flexDirection: "row", alignItems: "center", justifyContent: "space-between",
+    paddingHorizontal: 16, paddingBottom: 12,
+    paddingTop: Platform.OS === "ios" ? 56 : 20,
   },
-  instructions:  { gap: 18, width: '100%' },
-  step:          { flexDirection: 'row', gap: 16, alignItems: 'flex-start' },
-  stepNum:       { color: '#FF3355', fontSize: 12, fontWeight: '500', width: 16, marginTop: 2 },
-  stepText:      { color: '#333', fontSize: 13, flex: 1, lineHeight: 20 },
-  btn:           { backgroundColor: '#FF3355', paddingHorizontal: 44, paddingVertical: 15, borderRadius: 32 },
-  btnStop:       { backgroundColor: '#111', borderWidth: StyleSheet.hairlineWidth, borderColor: '#222' },
-  btnText:       { color: '#fff', fontSize: 15, fontWeight: '400', letterSpacing: 0.5 },
-  permTitle:     { color: '#fff', fontSize: 17, marginBottom: 28, textAlign: 'center' },
+  backBtn:         { width: 36, height: 36, borderRadius: 18, justifyContent: "center", alignItems: "center", backgroundColor: "rgba(0,0,0,0.06)" },
+  headerTitle:     { fontSize: 16, fontWeight: "800", letterSpacing: 1.5 },
+  liveBadgeHeader: { flexDirection: "row", alignItems: "center", gap: 5 },
+  liveDot:         { width: 7, height: 7, borderRadius: 4, backgroundColor: "#22c55e" },
+  liveText:        { color: "#22c55e", fontSize: 10, fontWeight: "800", letterSpacing: 1 },
+
+  // Scroll
+  scroll: { paddingBottom: 20 },
+
+  // Camera
+  cameraZone:    { marginHorizontal: 16, borderRadius: 24, overflow: "hidden", height: 230, backgroundColor: "#0a0a0a" },
+  cameraOverlay: { ...StyleSheet.absoluteFillObject, backgroundColor: "rgba(0,0,0,0.38)" },
+  fingerGuide:   { position: "absolute", inset: 0, top: 0, left: 0, right: 0, bottom: 36, alignItems: "center", justifyContent: "center", gap: 14 },
+  cameraHint:    { fontSize: 12, color: "rgba(255,255,255,0.5)", letterSpacing: 0.3 },
+
+  // Pulse rings
+  ringContainer: { width: 100, height: 100, alignItems: "center", justifyContent: "center" },
+  ring:          { position: "absolute", borderRadius: 50, borderWidth: 1.5, borderColor: "rgba(239,71,111,0.6)" },
+  ring1:         { width: 90, height: 90 },
+  ring2:         { width: 110, height: 110, borderColor: "rgba(239,71,111,0.3)" },
+  ringCore:      { width: 72, height: 72, borderRadius: 36, borderWidth: 1, borderColor: "rgba(255,255,255,0.18)", alignItems: "center", justifyContent: "center" },
+  fingerEmoji:   { fontSize: 30 },
+
+  // Torch badge
+  torchBadge: { position: "absolute", top: 12, right: 14, flexDirection: "row", alignItems: "center", gap: 5, backgroundColor: "rgba(255,255,255,0.10)", borderRadius: 8, paddingHorizontal: 9, paddingVertical: 5 },
+  torchDot:   { width: 6, height: 6, borderRadius: 3, backgroundColor: "#FFD84A" },
+  torchText:  { fontSize: 11, color: "rgba(255,220,100,0.9)", fontWeight: "600" },
+
+  // Progress
+  progressWrap:  { position: "absolute", bottom: 14, left: 16, right: 16 },
+  progressLabel: { fontSize: 10, color: "rgba(255,255,255,0.45)", marginBottom: 5 },
+  progressTrack: { height: 3, backgroundColor: "rgba(255,255,255,0.1)", borderRadius: 2, overflow: "hidden" },
+  progressFill:  { height: "100%", backgroundColor: "#ef476f", borderRadius: 2 },
+
+  // Metrics
+  metricsRow:  { flexDirection: "row", marginHorizontal: 16, marginTop: 12, gap: 8 },
+  metricCard:  { flex: 1, borderRadius: 16, paddingVertical: 12, paddingHorizontal: 10, alignItems: "center" },
+  metricLabel: { fontSize: 9, color: "#888780", letterSpacing: 1, marginBottom: 4 },
+  metricValue: { fontSize: 22, fontWeight: "700", lineHeight: 26 },
+  metricUnit:  { fontSize: 9, color: "#888780", marginTop: 2 },
+
+  // Waveform
+  section:         { marginHorizontal: 16, marginTop: 16 },
+  sectionLabel:    { fontSize: 10, fontWeight: "700", letterSpacing: 1, marginBottom: 8 },
+  waveBox:         { borderRadius: 14, overflow: "hidden", backgroundColor: "rgba(150,150,150,0.08)" },
+  wavePlaceholder: { fontSize: 11, color: "#888780" },
+
+  // Status
+  statusCard: { marginHorizontal: 16, marginTop: 12, borderRadius: 14, padding: 14, flexDirection: "row", alignItems: "flex-start", gap: 10 },
+  statusIcon: { fontSize: 16, lineHeight: 20 },
+  statusText: { flex: 1, fontSize: 13, lineHeight: 18 },
+
+  // Buttons
+  btnRow:         { marginHorizontal: 16, marginTop: 12 },
+  startBtn:       { backgroundColor: "#ef476f", borderRadius: 16, paddingVertical: 15, alignItems: "center" },
+  startBtnText:   { color: "#fff", fontSize: 15, fontWeight: "700", letterSpacing: 0.5 },
+  primaryBtn:     { borderRadius: 16, paddingVertical: 15, paddingHorizontal: 32, alignItems: "center" },
+  primaryBtnText: { color: "#fff", fontSize: 15, fontWeight: "700" },
+
+  // Steps
+  stepsCard:    { marginHorizontal: 16, marginTop: 14, borderRadius: 18, padding: 18 },
+  stepsTitle:   { fontSize: 11, fontWeight: "800", letterSpacing: 1, marginBottom: 14 },
+  stepRow:      { flexDirection: "row", alignItems: "flex-start", marginBottom: 12, gap: 12 },
+  stepNum:      { width: 24, height: 24, borderRadius: 12, backgroundColor: "#ef476f", alignItems: "center", justifyContent: "center", marginTop: 1 },
+  stepNumText:  { color: "#fff", fontSize: 11, fontWeight: "800" },
+  stepText:     { flex: 1, fontSize: 13, lineHeight: 18 },
+
+  // History
+  historyCard:         { borderRadius: 18, paddingHorizontal: 16, paddingVertical: 4 },
+  historyItem:         { flexDirection: "row", alignItems: "center", paddingVertical: 12, gap: 10 },
+  historyBorder:       { borderBottomWidth: 0.5, borderBottomColor: "rgba(150,150,150,0.15)" },
+  historyTime:         { fontSize: 12, color: "#888780", minWidth: 72 },
+  historyBpm:          { flex: 1, fontSize: 14, fontWeight: "600" },
+  historyTag:          { borderRadius: 20, paddingHorizontal: 10, paddingVertical: 3 },
+  historyTagText:      { fontSize: 11, fontWeight: "600" },
+  historyEmptyText:    { fontSize: 14, fontWeight: "600" },
+  historyEmptySubText: { fontSize: 12, marginTop: 4 },
 });

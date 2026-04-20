@@ -13,8 +13,18 @@ export default function TabLayout() {
   const isLight = theme === "light";
 
   const colors = isLight
-    ? { bg: "#ffffff", active: "#2563eb", inactive: "#94a3b8", border: "#e5e7eb" }
-    : { bg: "#0b1220", active: "#38bdf8", inactive: "#64748b", border: "#020617" };
+    ? {
+        bg: "#ffffff",
+        active: "#2563eb",
+        inactive: "#94a3b8",
+        border: "#e5e7eb",
+      }
+    : {
+        bg: "#0b1220",
+        active: "#38bdf8",
+        inactive: "#64748b",
+        border: "#020617",
+      };
 
   return (
     <GestureHandlerRootView style={{ flex: 1 }}>
@@ -30,7 +40,11 @@ export default function TabLayout() {
           },
           tabBarActiveTintColor: colors.active,
           tabBarInactiveTintColor: colors.inactive,
-          tabBarLabelStyle: { fontSize: 10, marginBottom: 4, fontWeight: "600" },
+          tabBarLabelStyle: {
+            fontSize: 10,
+            marginBottom: 4,
+            fontWeight: "600",
+          },
         }}
       >
         {/* HOME */}
@@ -38,7 +52,9 @@ export default function TabLayout() {
           name="index"
           options={{
             title: "Home",
-            tabBarIcon: ({ color }) => <Ionicons name="home" size={24} color={color} />,
+            tabBarIcon: ({ color }) => (
+              <Ionicons name="home" size={24} color={color} />
+            ),
           }}
         />
 
@@ -47,7 +63,9 @@ export default function TabLayout() {
           name="history"
           options={{
             title: "History",
-            tabBarIcon: ({ color }) => <Ionicons name="time" size={24} color={color} />,
+            tabBarIcon: ({ color }) => (
+              <Ionicons name="time" size={24} color={color} />
+            ),
           }}
         />
 
@@ -56,33 +74,43 @@ export default function TabLayout() {
           name="twin"
           options={{
             title: "Twin",
-            tabBarIcon: ({ color }) => <Ionicons name="pulse" size={26} color={color} />,
+            tabBarIcon: ({ color }) => (
+              <Ionicons name="pulse" size={26} color={color} />
+            ),
           }}
         />
 
-        {/* INSIGHTS — analytics, trends, organ health */}
+        {/* DOCUMENTS — medical reports and records */}
         <Tabs.Screen
-          name="insights"
+          name="documents"
           options={{
-            title: "Insights",
-            tabBarIcon: ({ color }) => <Ionicons name="analytics" size={24} color={color} />,
+            title: "Documents",
+            tabBarIcon: ({ color }) => (
+              <Ionicons name="document-text" size={24} color={color} />
+            ),
           }}
         />
 
-        {/* PROFILE */}
-        <Tabs.Screen
-          name="profile"
-          options={{
-            title: "Profile",
-            tabBarIcon: ({ color }) => <Ionicons name="person-circle" size={24} color={color} />,
-          }}
-        />
-
-        {/* AI HEALTH — hidden from tab bar, navigated to from home */}
+        {/* AI HEALTH */}
         <Tabs.Screen
           name="ai-health"
           options={{
-            href: null, // hides from tab bar
+            title: "AI Health",
+            tabBarIcon: ({ color }) => (
+              <Ionicons
+                name="chatbubble-ellipses"
+                size={24}
+                color={color}
+              />
+            ),
+          }}
+        />
+
+        {/* HIDDEN INSIGHTS SCREEN */}
+        <Tabs.Screen
+          name="insights"
+          options={{
+            href: null, // 🚫 Removes it from the bottom navigation
           }}
         />
       </Tabs>

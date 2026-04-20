@@ -15,6 +15,7 @@ import { Ionicons } from "@expo/vector-icons";
 import { useRouter } from "expo-router";
 
 import { useTheme } from "../context/ThemeContext";
+import { useBiogearsTwin } from "../context/BiogearsTwinContext";
 
 const STORAGE_KEY = "vt_rest_reminders";
 
@@ -26,6 +27,7 @@ type Alarm = {
 export default function RestScreen() {
   const router = useRouter();
   const { theme } = useTheme();
+  const { addEvent } = useBiogearsTwin();
 
   const colors =
     theme === "light"
@@ -114,7 +116,36 @@ export default function RestScreen() {
   };
 
   const logSleep = () => {
-    alert("Sleep session logged!");
+    const hrs = parseFloat(duration);
+
+    if (!hrs || hrs <= 0) {
+      alert("Please enter a valid sleep duration.");
+      return;
+    }
+
+    try {
+      // Convert quality index (0–3) to normalized value (0–1)
+      const normalizedQuality = quality / 3;
+
+      // Current time in HH:MM format
+      const now = new Date();
+      const wallTime = now.toTimeString().slice(0, 5);
+
+      // Log sleep event to Bio-GARES
+      addEvent({
+  event_type: "sleep",
+  value: hrs,
+  wallTime,
+  duration_seconds: hrs * 3600,
+  displayLabel: `Sleep · ${hrs} hrs`,
+  displayIcon: "😴",
+});
+
+      alert("Sleep session logged successfully!");
+    } catch (error) {
+      console.error("BioGears Sleep Sync Error:", error);
+      alert("Failed to sync with Bio-GARES.");
+    }
   };
 
   const qualityIcons = ["😴", "🥱", "😊", "🤩"];

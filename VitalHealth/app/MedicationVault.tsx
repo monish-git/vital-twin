@@ -25,8 +25,8 @@ import { deleteMedicine } from "../database/medicineDB";
 import { cancelMedicineNotification } from "../services/notificationService";
 
 // History
+import { log, error } from "../utils/logger";
 import { addToMedicineHistory } from "../utils/medicineHistory";
-
 ///////////////////////////////////////////////////////////
 
 export default function MedicationVault() {
@@ -107,10 +107,13 @@ export default function MedicationVault() {
 
               reloadMedicines();
 
-              console.log("✅ Deleted + history saved");
+log("✅ Deleted + history saved");
+
             } catch (error) {
-              console.log("❌ Delete error:", error);
-            }
+  if (error instanceof Error) {
+    console.log(error.message); // ✅ safe
+  }
+}
           },
         },
       ]

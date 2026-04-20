@@ -8,7 +8,7 @@
 import { Ionicons } from "@expo/vector-icons";
 import { LinearGradient } from "expo-linear-gradient";
 import { useRouter } from "expo-router";
-import React, { useMemo } from "react";
+import React, { useMemo, useEffect } from "react";
 import {
   Dimensions,
   ScrollView,
@@ -23,6 +23,11 @@ import { useNutrition } from "../context/NutritionContext";
 import { useProfile } from "../context/ProfileContext";
 import { useSteps } from "../context/StepContext";
 import { useTheme } from "../context/ThemeContext";
+
+// 🔹 Firebase Imports
+import { doc, setDoc, onSnapshot } from "firebase/firestore";
+import { db } from "../services/firebase";
+import { getUserId } from "../services/firebaseSync";
 
 const { width } = Dimensions.get("window");
 
@@ -40,12 +45,32 @@ const ACTIVITY_LEVELS = [
   { label: "Extra Active", description: "Hard training + physical job", multiplier: 1.9   },
 ];
 
-const AVG_STRIDE_M = 0.762;
-function walkCalories(steps: number, secs: number, weightKg: number): number {
-  if (steps === 0 || secs === 0) return 0;
-  const distM    = steps * AVG_STRIDE_M;
+// REMOVED: const AVG_STRIDE_M = 0.762;
+
+// UPDATED: walkCalories now uses height-based stride length
+function walkCalories(
+  steps: number, 
+  secs: number, 
+  weightKg: number, 
+  heightCm: number
+): number {
+  if (steps === 0 || secs === 0 || weightKg <= 0 || heightCm <= 0) {
+    return 0;
+  }
+
+  // Stride length based on user's height (ACSM standard: 0.413 × height)
+  const strideM = 0.413 * (heightCm / 100);
+
+  // Distance covered in meters
+  const distM = steps * strideM;
+
+  // Walking speed (meters per minute)
   const speedMPM = distM / Math.max(1, secs / 60);
-  const MET      = Math.max(2.0, (0.1 * speedMPM + 3.5) / 3.5);
+
+  // MET estimation using ACSM walking equation
+  const MET = Math.max(2.0, (0.1 * speedMPM + 3.5) / 3.5);
+
+  // Calories burned
   return Math.round(MET * weightKg * (secs / 3600));
 }
 
@@ -202,7 +227,11 @@ export default function CalorieIntelligenceScreen() {
 
   // ── Derived science ───────────────────────────────────────────────────────
   const bmr   = useMemo(() => calcBMR(weightKg, heightCm, ageYears, profile.gender), [weightKg, heightCm, ageYears, profile.gender]);
-  const tdee  = useMemo(() => Math.round(bmr * 1.375), [bmr]);
+  
+  // UPDATED: TDEE now uses activity multiplier from selected profile
+  const activityMultiplier = selectedProfile?.activityMultiplier ?? 1.375;
+  const tdee = useMemo(() => Math.round(bmr * activityMultiplier), [bmr, activityMultiplier]);
+  
   const mac   = useMemo(() => stdMacros(tdee), [tdee]);
   const bmi   = useMemo(() => parseFloat((weightKg / ((heightCm / 100) ** 2)).toFixed(1)), [weightKg, heightCm]);
 
@@ -212,9 +241,56 @@ export default function CalorieIntelligenceScreen() {
     : bmi < 30 ? { label: "Overweight",  color: "#f59e0b" }
     :            { label: "Obese",        color: "#ef4444" };
 
-  const stepCal = useMemo(() => walkCalories(steps, sessionSecs, weightKg), [steps, sessionSecs, weightKg]);
+  // UPDATED: walkCalories now includes heightCm parameter
+  const stepCal = useMemo(
+    () => walkCalories(steps, sessionSecs, weightKg, heightCm), 
+    [steps, sessionSecs, weightKg, heightCm]
+  );
   const netCal  = Math.max(0, tdee - stepCal);
   const burnPct = Math.min(1, stepCal / (tdee * 0.3));
+
+  /* 🔹 Sync Calorie Data with Firebase */
+  useEffect(() => {
+    let unsubscribe: (() => void) | undefined;
+
+    const syncCaloriesWithFirebase = async () => {
+      try {
+        const uid = await getUserId();
+        if (!uid) return;
+
+        const userRef = doc(db, "users", uid);
+
+        // 🔹 Save calorie data to Firebase
+        await setDoc(
+          userRef,
+          {
+            caloriesBurned: stepCal,
+            caloriesConsumed: totals.calories,
+            tdee: tdee,
+            bmr: bmr,
+            steps: steps,
+            updatedAt: new Date().toISOString(),
+          },
+          { merge: true }
+        );
+
+        // 🔹 Real-time listener
+        unsubscribe = onSnapshot(userRef, (snapshot) => {
+          if (snapshot.exists()) {
+            console.log("🔥 Calorie data synced:", snapshot.data());
+          }
+        });
+      } catch (error) {
+        console.error("❌ Error syncing calorie data:", error);
+      }
+    };
+
+    syncCaloriesWithFirebase();
+
+    return () => {
+      if (unsubscribe) unsubscribe();
+    };
+  }, [stepCal, totals.calories, tdee, bmr, steps]);
 
   // Calorie balance: TDEE vs what user has actually eaten
   const caloriesConsumed = totals.calories;
@@ -679,12 +755,15 @@ export default function CalorieIntelligenceScreen() {
           <Text style={[s.actNote, { color: colors.sub }]}>* Calculated using your BMR ({bmr} kcal)</Text>
         </View>
 
-        {/* Personalised insights */}
+        {/* Personalised insights - UPDATED with height-based calorie calculation */}
         <View style={[s.card, { backgroundColor: colors.card }]}>
           <Text style={[s.cardTitle, { color: colors.sub }]}>💡 PERSONALISED INSIGHTS</Text>
           <Text style={[s.tip, { color: colors.sub }]}>• Your BMR is {bmr} kcal — calories you burn just existing</Text>
           <Text style={[s.tip, { color: colors.sub }]}>• Each kg of body weight ≈ {Math.round(bmr / weightKg)} kcal/day in BMR</Text>
-          <Text style={[s.tip, { color: colors.sub }]}>• Walking 10,000 steps burns ≈ {walkCalories(10000, 5400, weightKg)} kcal for your weight</Text>
+          <Text style={[s.tip, { color: colors.sub }]}>
+            • Walking 10,000 steps burns ≈{" "}
+            {walkCalories(10000, 5400, weightKg, heightCm)} kcal for your body metrics
+          </Text>
           <Text style={[s.tip, { color: colors.sub }]}>• To lose 0.5 kg/week, eat ~{tdee - 500} kcal/day</Text>
           <Text style={[s.tip, { color: colors.sub }]}>• You've consumed {caloriesConsumed} / {rec.calories} kcal target today ({Math.round((caloriesConsumed / rec.calories) * 100)}%)</Text>
         </View>

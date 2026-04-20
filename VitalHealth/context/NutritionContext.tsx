@@ -72,6 +72,7 @@ export type HealthProfile = {
   label: string;
   icon: string;
   color: string;
+  activityMultiplier: number; // ✅ Added
   recommendations: NutritionTotals;
   tips: string[];
 };
@@ -83,7 +84,11 @@ export const healthProfiles: HealthProfile[] = [
     label: "Standard",
     icon: "🍽️",
     color: "#3b82f6",
-    recommendations: { calories: 2000, protein: 50, carbs: 250, fat: 65, sugar: 50, sodium: 2300, fiber: 25 },
+    activityMultiplier: 1.375,
+    recommendations: {
+      calories: 2000, protein: 50, carbs: 250, fat: 65,
+      sugar: 50, sodium: 2300, fiber: 25
+    },
     tips: [
       "Eat a balanced diet with fruits and vegetables",
       "Include lean proteins in every meal",
@@ -96,7 +101,11 @@ export const healthProfiles: HealthProfile[] = [
     label: "Diabetes",
     icon: "🩸",
     color: "#ef4444",
-    recommendations: { calories: 1800, protein: 60, carbs: 150, fat: 60, sugar: 25, sodium: 2000, fiber: 35 },
+    activityMultiplier: 1.2,
+    recommendations: {
+      calories: 1800, protein: 60, carbs: 150, fat: 60,
+      sugar: 25, sodium: 2000, fiber: 35
+    },
     tips: [
       "Choose complex carbs over simple sugars",
       "Monitor blood sugar before and after meals",
@@ -110,7 +119,11 @@ export const healthProfiles: HealthProfile[] = [
     label: "High BP",
     icon: "❤️",
     color: "#f97316",
-    recommendations: { calories: 1900, protein: 55, carbs: 220, fat: 55, sugar: 30, sodium: 1500, fiber: 30 },
+    activityMultiplier: 1.2,
+    recommendations: {
+      calories: 1900, protein: 55, carbs: 220, fat: 55,
+      sugar: 30, sodium: 1500, fiber: 30
+    },
     tips: [
       "Limit sodium to less than 1500mg per day",
       "Eat potassium-rich foods (bananas, spinach)",
@@ -124,7 +137,11 @@ export const healthProfiles: HealthProfile[] = [
     label: "Cholesterol",
     icon: "🥑",
     color: "#8b5cf6",
-    recommendations: { calories: 1900, protein: 60, carbs: 200, fat: 50, sugar: 30, sodium: 2000, fiber: 35 },
+    activityMultiplier: 1.375,
+    recommendations: {
+      calories: 1900, protein: 60, carbs: 200, fat: 50,
+      sugar: 30, sodium: 2000, fiber: 35
+    },
     tips: [
       "Choose healthy fats (olive oil, avocado)",
       "Eat oats and barley for soluble fiber",
@@ -138,7 +155,11 @@ export const healthProfiles: HealthProfile[] = [
     label: "Keto",
     icon: "🥓",
     color: "#f59e0b",
-    recommendations: { calories: 1800, protein: 75, carbs: 30, fat: 140, sugar: 10, sodium: 2500, fiber: 15 },
+    activityMultiplier: 1.55,
+    recommendations: {
+      calories: 1800, protein: 75, carbs: 30, fat: 140,
+      sugar: 10, sodium: 2500, fiber: 15
+    },
     tips: [
       "Keep carbs under 30g per day",
       "Focus on healthy fats and moderate protein",
@@ -152,7 +173,11 @@ export const healthProfiles: HealthProfile[] = [
     label: "Renal",
     icon: "🧂",
     color: "#6b7280",
-    recommendations: { calories: 2000, protein: 40, carbs: 250, fat: 60, sugar: 30, sodium: 1500, fiber: 20 },
+    activityMultiplier: 1.2,
+    recommendations: {
+      calories: 2000, protein: 40, carbs: 250, fat: 60,
+      sugar: 30, sodium: 1500, fiber: 20
+    },
     tips: [
       "Limit protein to preserve kidney function",
       "Control potassium and phosphorus intake",

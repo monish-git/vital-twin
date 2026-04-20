@@ -5,8 +5,30 @@ import * as SQLite from "expo-sqlite";
 const db = SQLite.openDatabaseSync("medicine.db");
 
 ///////////////////////////////////////////////////////////
+// ✅ Medicine type — used for typed DB queries
+//    Eliminates all (med as any) casts throughout the app
+///////////////////////////////////////////////////////////
+
+export interface Medicine {
+  id: number;
+  name: string;
+  dose: string;
+  type: string;
+  time: string;
+  timestamp: number;
+  meal: string;
+  frequency: string;
+  startDate: string;
+  endDate: string;
+  reminder: number;
+  notificationId: string;
+  taken: number;
+}
+
+///////////////////////////////////////////////////////////
 // INIT TABLE
 ///////////////////////////////////////////////////////////
+
 export async function initMedicineDB() {
   try {
     await db.execAsync(`
@@ -36,6 +58,7 @@ export async function initMedicineDB() {
 ///////////////////////////////////////////////////////////
 // ADD MEDICINE
 ///////////////////////////////////////////////////////////
+
 export function addMedicine(
   name: string,
   dose: string,
@@ -72,13 +95,15 @@ export function addMedicine(
 ///////////////////////////////////////////////////////////
 // GET MEDICINES
 ///////////////////////////////////////////////////////////
-export function getMedicines() {
-  return db.getAllSync("SELECT * FROM medicines ORDER BY timestamp ASC");
+
+export function getMedicines(): Medicine[] {
+  return db.getAllSync<Medicine>("SELECT * FROM medicines ORDER BY timestamp ASC");
 }
 
 ///////////////////////////////////////////////////////////
 // DELETE MEDICINE
 ///////////////////////////////////////////////////////////
+
 export function deleteMedicine(id: number) {
   db.runSync("DELETE FROM medicines WHERE id = ?", [id]);
 }
@@ -86,6 +111,7 @@ export function deleteMedicine(id: number) {
 ///////////////////////////////////////////////////////////
 // UPDATE NOTIFICATION ID
 ///////////////////////////////////////////////////////////
+
 export function updateMedicineNotificationId(
   id: number,
   notificationId: string
@@ -99,6 +125,7 @@ export function updateMedicineNotificationId(
 ///////////////////////////////////////////////////////////
 // MARK TAKEN (BY ID)
 ///////////////////////////////////////////////////////////
+
 export async function markMedicineTaken(medicineId: string) {
   try {
     await db.runAsync(
@@ -113,8 +140,9 @@ export async function markMedicineTaken(medicineId: string) {
 }
 
 ///////////////////////////////////////////////////////////
-// MARK TAKEN (BY NOTIFICATION ID) 🔥 USED IN CONTEXT
+// MARK TAKEN (BY NOTIFICATION ID)
 ///////////////////////////////////////////////////////////
+
 export function markMedicineTakenByNotificationId(
   notificationId: string
 ) {
@@ -127,6 +155,7 @@ export function markMedicineTakenByNotificationId(
 ///////////////////////////////////////////////////////////
 // SAVE HISTORY
 ///////////////////////////////////////////////////////////
+
 export async function saveMedicineHistory(medicineId: string) {
   try {
     const date = new Date().toISOString();
@@ -153,6 +182,7 @@ export async function saveMedicineHistory(medicineId: string) {
 ///////////////////////////////////////////////////////////
 // MARK MISSED MEDICINES
 ///////////////////////////////////////////////////////////
+
 export async function markMissedMedicines() {
   try {
     const now = Date.now();
@@ -171,6 +201,7 @@ export async function markMissedMedicines() {
 ///////////////////////////////////////////////////////////
 // GET TODAY STATS
 ///////////////////////////////////////////////////////////
+
 export async function getTodayMedicineStats() {
   try {
     const taken: any = await db.getFirstAsync(
@@ -192,12 +223,14 @@ export async function getTodayMedicineStats() {
 }
 
 ///////////////////////////////////////////////////////////
-// 🔧 FIX FOR BACKGROUND TASK
+// GET BY NOTIFICATION ID
+// ✅ FIXED (Bug 5): Now returns typed Medicine | null instead of unknown.
+//    Eliminates all (med as any).frequency casts in index.js and notifeeService.ts.
 ///////////////////////////////////////////////////////////
 
-export function getMedicineByNotificationId(notificationId: string) {
+export function getMedicineByNotificationId(notificationId: string): Medicine | null {
   try {
-    const result = db.getAllSync(
+    const result = db.getAllSync<Medicine>(
       "SELECT * FROM medicines WHERE notificationId = ?",
       [notificationId]
     );
@@ -208,6 +241,10 @@ export function getMedicineByNotificationId(notificationId: string) {
     return null;
   }
 }
+
+///////////////////////////////////////////////////////////
+// DELETE BY NOTIFICATION ID
+///////////////////////////////////////////////////////////
 
 export function deleteMedicineByNotificationId(notificationId: string) {
   try {

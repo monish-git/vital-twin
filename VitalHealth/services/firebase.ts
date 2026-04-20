@@ -1,6 +1,9 @@
 import { initializeApp } from "firebase/app";
-import { getAuth } from "firebase/auth";
+// @ts-ignore — getReactNativePersistence is available at runtime in Firebase 12
+// but TypeScript types may not expose it depending on the module resolution
+import { initializeAuth, getReactNativePersistence } from "firebase/auth";
 import { getFirestore } from "firebase/firestore";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 
 const firebaseConfig = {
   apiKey: "AIzaSyDaEevmPis-M0PYDw4ZkPiPUSpwEQcw1tw",
@@ -14,8 +17,10 @@ const firebaseConfig = {
 
 const app = initializeApp(firebaseConfig);
 
-// ✅ SIMPLE & WORKING
-export const auth = getAuth(app);
+// ✅ Auth with AsyncStorage persistence — login session survives app restarts
+export const auth = initializeAuth(app, {
+  persistence: getReactNativePersistence(AsyncStorage),
+});
 
 // ✅ Firestore
 export const db = getFirestore(app);

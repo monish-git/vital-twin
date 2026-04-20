@@ -142,15 +142,11 @@ function OrganCard({ name, score, status }: any) {
 
 // ─── Main Screen ─────────────────────────────────────────────────────────────
 
-type Tab = 'nutrition' | 'hydration' | 'activity' | 'substances' | 'sleep' | 'stress';
+type Tab = 'substances' | 'stress';
 
 const TABS: { id: Tab; label: string; icon: string }[] = [
-  { id: 'nutrition',  label: 'Nutrition',  icon: '🍽️' },
-  { id: 'hydration',  label: 'Hydration',  icon: '💧' },
-  { id: 'activity',   label: 'Activity',   icon: '🏃' },
   { id: 'substances', label: 'Substances', icon: '☕' },
-  { id: 'sleep',      label: 'Sleep',      icon: '😴' },
-  { id: 'stress',     label: 'Stress',     icon: '🧘' },
+  { id: 'stress', label: 'Stress', icon: '🧘' },
 ];
 
 export default function TwinScreen() {
@@ -184,38 +180,15 @@ export default function TwinScreen() {
   };
 
   // ── routine panel state ──────────────────────────────────────────────────
-  const [activeTab, setActiveTab] = useState<Tab>('nutrition');
+  const [activeTab, setActiveTab] = useState<Tab>('substances');
 
   // Per-event times (each event type has its own time so they're independent)
-  const [nutritionTime,  setNutritionTime]  = useState(now());
-  const [hydrationTime,  setHydrationTime]  = useState(now());
-  const [activityTime,   setActivityTime]   = useState(now());
   const [substanceTime,  setSubstanceTime]  = useState(now());
-  const [sleepTime,      setSleepTime]      = useState(now());
   const [stressTime,     setStressTime]     = useState(now());
-
-  // Nutrition
-  type MealType = 'balanced' | 'high_carb' | 'high_protein' | 'fast_food' | 'ketogenic' | 'custom';
-  const [mealCal, setMealCal] = useState('');
-  const [mealType, setMealType] = useState<MealType>('balanced');
-  const [carbG, setCarbG] = useState('');
-  const [fatG, setFatG] = useState('');
-  const [proteinG, setProteinG] = useState('');
-  const MEAL_TYPES: MealType[] = ['balanced', 'high_carb', 'high_protein', 'fast_food', 'ketogenic', 'custom'];
-
-  // Hydration
-  const [waterMl, setWaterMl] = useState('250');
-
-  // Activity
-  const [exerciseIntensity, setExerciseIntensity] = useState('0.5');
-  const [exerciseDur, setExerciseDur] = useState('30');
 
   // Substances
   const [subName, setSubName] = useState('Caffeine');
   const [subDose, setSubDose] = useState('200');
-
-  // Sleep
-  const [sleepHours, setSleepHours] = useState('7.5');
 
   // Stress
   const [stressLevel, setStressLevel] = useState('0.3');
@@ -235,45 +208,6 @@ export default function TwinScreen() {
 
   // ── Add event handlers ────────────────────────────────────────────────────
 
-  const addNutrition = () => {
-    const cal = parseFloat(mealCal);
-    if (!cal || cal <= 0) return Alert.alert('Enter calories');
-    addEvent({
-      event_type: 'meal',
-      value: cal,
-      wallTime: nutritionTime,
-      meal_type: mealType,
-      carb_g: mealType === 'custom' ? parseFloat(carbG) || undefined : undefined,
-      fat_g: mealType === 'custom' ? parseFloat(fatG) || undefined : undefined,
-      protein_g: mealType === 'custom' ? parseFloat(proteinG) || undefined : undefined,
-      displayLabel: `Meal · ${cal} kcal (${mealType})`,
-      displayIcon: '🍽️',
-    });
-    setMealCal('');
-  };
-
-  const addHydration = () => {
-    const ml = parseFloat(waterMl);
-    if (!ml || ml <= 0) return Alert.alert('Enter water amount');
-    addEvent({
-      event_type: 'water', value: ml, wallTime: hydrationTime,
-      displayLabel: `Water · ${ml} mL`, displayIcon: '💧',
-    });
-    setWaterMl('250');
-  };
-
-  const addActivity = () => {
-    const intensity = parseFloat(exerciseIntensity);
-    const dur = parseInt(exerciseDur, 10) * 60;
-    if (isNaN(intensity) || intensity <= 0) return Alert.alert('Enter intensity');
-    addEvent({
-      event_type: 'exercise', value: intensity, wallTime: activityTime,
-      duration_seconds: dur,
-      displayLabel: `Exercise · ${Math.round(intensity * 100)}% · ${exerciseDur}min`,
-      displayIcon: '🏃',
-    });
-  };
-
   const addSubstance = () => {
     const dose = parseFloat(subDose);
     if (!subName) return Alert.alert('Select substance');
@@ -282,16 +216,6 @@ export default function TwinScreen() {
       substance_name: subName,
       displayLabel: `${subName} · ${dose}`, displayIcon: '☕',
     });
-  };
-
-  const addSleep = () => {
-    const hrs = parseFloat(sleepHours);
-    if (!hrs || hrs <= 0) return Alert.alert('Enter sleep hours');
-    addEvent({
-      event_type: 'sleep', value: hrs, wallTime: sleepTime,
-      displayLabel: `Sleep · ${hrs} hrs`, displayIcon: '😴',
-    });
-    setSleepHours('7.5');
   };
 
   const addStress = () => {
@@ -360,101 +284,6 @@ export default function TwinScreen() {
 
   const renderTabContent = () => {
     switch (activeTab) {
-      case 'nutrition': return (
-        <View style={ss.tabContent}>
-          <Text style={[ss.tabHint, { color: c.sub }]}>Log what you eat with calorie info</Text>
-          <TextInput style={[ss.input, { backgroundColor: c.card, color: c.text, borderColor: c.border }]}
-            placeholder="Calories (kcal)" placeholderTextColor={c.sub}
-            keyboardType="numeric" value={mealCal} onChangeText={setMealCal} />
-          <ScrollView horizontal showsHorizontalScrollIndicator={false} style={ss.chipRow}>
-            {MEAL_TYPES.map(t => (
-              <TouchableOpacity key={t} onPress={() => setMealType(t as MealType)}
-                style={[ss.chip, mealType === t && { backgroundColor: c.active }]}>
-                <Text style={[ss.chipTxt, mealType === t && { color: '#fff' }]}>
-                  {t.replace('_', ' ')}
-                </Text>
-              </TouchableOpacity>
-            ))}
-          </ScrollView>
-          {mealType === 'custom' && (
-            <View style={ss.row}>
-              <TextInput style={[ss.inputSm, { backgroundColor: c.card, color: c.text, borderColor: c.border }]}
-                placeholder="Carbs (g)" placeholderTextColor={c.sub} keyboardType="numeric"
-                value={carbG} onChangeText={setCarbG} />
-              <TextInput style={[ss.inputSm, { backgroundColor: c.card, color: c.text, borderColor: c.border }]}
-                placeholder="Fat (g)" placeholderTextColor={c.sub} keyboardType="numeric"
-                value={fatG} onChangeText={setFatG} />
-              <TextInput style={[ss.inputSm, { backgroundColor: c.card, color: c.text, borderColor: c.border }]}
-                placeholder="Protein (g)" placeholderTextColor={c.sub} keyboardType="numeric"
-                value={proteinG} onChangeText={setProteinG} />
-            </View>
-          )}
-          <View style={[ss.inlineTimeRow, { backgroundColor: c.bg }]}>
-            <Ionicons name="time-outline" size={14} color={c.sub} />
-            <Text style={[ss.inlineTimeLabel, { color: c.sub }]}>Meal time:</Text>
-            <TimePicker value={nutritionTime} onChange={setNutritionTime} />
-          </View>
-          <TouchableOpacity style={[ss.addBtn, { backgroundColor: c.active }]} onPress={addNutrition}>
-            <Text style={ss.addBtnTxt}>+ Add Meal</Text>
-          </TouchableOpacity>
-        </View>
-      );
-
-      case 'hydration': return (
-        <View style={ss.tabContent}>
-          <Text style={[ss.tabHint, { color: c.sub }]}>Log water & fluid intake</Text>
-          <View style={ss.row}>
-            {['150', '250', '350', '500'].map(ml => (
-              <TouchableOpacity key={ml} onPress={() => setWaterMl(ml)}
-                style={[ss.chip, waterMl === ml && { backgroundColor: '#0ea5e9' }]}>
-                <Text style={[ss.chipTxt, waterMl === ml && { color: '#fff' }]}>{ml}mL</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-          <TextInput style={[ss.input, { backgroundColor: c.card, color: c.text, borderColor: c.border }]}
-            placeholder="Custom mL" placeholderTextColor={c.sub}
-            keyboardType="numeric" value={waterMl} onChangeText={setWaterMl} />
-          <View style={[ss.inlineTimeRow, { backgroundColor: c.bg }]}>
-            <Ionicons name="time-outline" size={14} color={c.sub} />
-            <Text style={[ss.inlineTimeLabel, { color: c.sub }]}>Time:</Text>
-            <TimePicker value={hydrationTime} onChange={setHydrationTime} />
-          </View>
-          <TouchableOpacity style={[ss.addBtn, { backgroundColor: '#0ea5e9' }]} onPress={addHydration}>
-            <Text style={ss.addBtnTxt}>+ Add Water</Text>
-          </TouchableOpacity>
-        </View>
-      );
-
-      case 'activity': return (
-        <View style={ss.tabContent}>
-          <Text style={[ss.tabHint, { color: c.sub }]}>Log physical activity (0 = rest, 1 = max effort)</Text>
-          <View style={ss.row}>
-            {[['0.2','Light'],['0.5','Moderate'],['0.7','Hard'],['0.9','Max']].map(([v, l]) => (
-              <TouchableOpacity key={v} onPress={() => setExerciseIntensity(v)}
-                style={[ss.chip, exerciseIntensity === v && { backgroundColor: '#10b981' }]}>
-                <Text style={[ss.chipTxt, exerciseIntensity === v && { color: '#fff' }]}>{l}</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-          <View style={ss.row}>
-            <TextInput style={[ss.inputSm, { backgroundColor: c.card, color: c.text, borderColor: c.border }]}
-              placeholder="Intensity 0-1" placeholderTextColor={c.sub}
-              keyboardType="numeric" value={exerciseIntensity} onChangeText={setExerciseIntensity} />
-            <TextInput style={[ss.inputSm, { backgroundColor: c.card, color: c.text, borderColor: c.border }]}
-              placeholder="Duration (min)" placeholderTextColor={c.sub}
-              keyboardType="numeric" value={exerciseDur} onChangeText={setExerciseDur} />
-          </View>
-          <View style={[ss.inlineTimeRow, { backgroundColor: c.bg }]}>
-            <Ionicons name="time-outline" size={14} color={c.sub} />
-            <Text style={[ss.inlineTimeLabel, { color: c.sub }]}>Started at:</Text>
-            <TimePicker value={activityTime} onChange={setActivityTime} />
-          </View>
-          <TouchableOpacity style={[ss.addBtn, { backgroundColor: '#10b981' }]} onPress={addActivity}>
-            <Text style={ss.addBtnTxt}>+ Add Exercise</Text>
-          </TouchableOpacity>
-        </View>
-      );
-
       case 'substances': return (
         <View style={ss.tabContent}>
           <Text style={[ss.tabHint, { color: c.sub }]}>Caffeine, alcohol, medications and more</Text>
@@ -476,31 +305,6 @@ export default function TwinScreen() {
           </View>
           <TouchableOpacity style={[ss.addBtn, { backgroundColor: '#8b5cf6' }]} onPress={addSubstance}>
             <Text style={ss.addBtnTxt}>+ Add Substance</Text>
-          </TouchableOpacity>
-        </View>
-      );
-
-      case 'sleep': return (
-        <View style={ss.tabContent}>
-          <Text style={[ss.tabHint, { color: c.sub }]}>Log sleep duration</Text>
-          <View style={ss.row}>
-            {['5','6','7','7.5','8','9'].map(h => (
-              <TouchableOpacity key={h} onPress={() => setSleepHours(h)}
-                style={[ss.chip, sleepHours === h && { backgroundColor: '#6366f1' }]}>
-                <Text style={[ss.chipTxt, sleepHours === h && { color: '#fff' }]}>{h}h</Text>
-              </TouchableOpacity>
-            ))}
-          </View>
-          <TextInput style={[ss.input, { backgroundColor: c.card, color: c.text, borderColor: c.border }]}
-            placeholder="Hours (e.g. 7.5)" placeholderTextColor={c.sub}
-            keyboardType="numeric" value={sleepHours} onChangeText={setSleepHours} />
-          <View style={[ss.inlineTimeRow, { backgroundColor: c.bg }]}>
-            <Ionicons name="time-outline" size={14} color={c.sub} />
-            <Text style={[ss.inlineTimeLabel, { color: c.sub }]}>Went to sleep:</Text>
-            <TimePicker value={sleepTime} onChange={setSleepTime} />
-          </View>
-          <TouchableOpacity style={[ss.addBtn, { backgroundColor: '#6366f1' }]} onPress={addSleep}>
-            <Text style={ss.addBtnTxt}>+ Add Sleep</Text>
           </TouchableOpacity>
         </View>
       );
@@ -757,7 +561,38 @@ export default function TwinScreen() {
       <ScrollView style={{ flex: 1 }} contentContainerStyle={{ padding: 16, paddingTop: insets.top + 62, paddingBottom: 140 }}
         showsVerticalScrollIndicator={false}>
 
-        {/* No global time picker — time is set inline per event type */}
+        {/* Linked Health Modules - Navigation to External Modules */}
+        <View style={{ marginBottom: 12 }}>
+          <Text style={[ss.section, { color: c.text, marginTop: 0 }]}>
+            Linked Health Modules
+          </Text>
+
+          <View style={{ flexDirection: 'row', flexWrap: 'wrap', gap: 8 }}>
+            <TouchableOpacity
+              style={[ss.actionBtn, { backgroundColor: '#0ea5e9', flex: 0 }]}
+              onPress={() => router.push('/hydration')}>
+              <Text style={ss.addBtnTxt}>💧 Hydration</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[ss.actionBtn, { backgroundColor: '#10b981', flex: 0 }]}
+              onPress={() => router.push('/activity')}>
+              <Text style={ss.addBtnTxt}>🏃 Activity</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[ss.actionBtn, { backgroundColor: '#f59e0b', flex: 0 }]}
+              onPress={() => router.push('/nutrition')}>
+              <Text style={ss.addBtnTxt}>🍽️ Nutrition</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={[ss.actionBtn, { backgroundColor: '#6366f1', flex: 0 }]}
+              onPress={() => router.push('/rest')}>
+              <Text style={ss.addBtnTxt}>😴 Rest</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
 
         {/* Tab Bar */}
         <ScrollView horizontal showsHorizontalScrollIndicator={false} style={ss.tabBar}>
@@ -882,14 +717,7 @@ export default function TwinScreen() {
   return (
     <View style={[ss.root, { backgroundColor: c.bg }]}>
       <Header title={mode === 'dashboard' ? 'Clinical Twin' : 'Log Routine'} showBack={false} />
-      {mode === 'routine' && (
-        <TouchableOpacity
-          style={{ position: 'absolute', top: insets.top + 56, right: 16, zIndex: 10,
-            backgroundColor: '#1e293b', borderRadius: 20, paddingHorizontal: 12, paddingVertical: 6 }}
-          onPress={() => switchMode('dashboard')}>
-          <Text style={{ color: '#38bdf8', fontSize: 12, fontWeight: '700' }}>📊 Dashboard</Text>
-        </TouchableOpacity>
-      )}
+      
 
       {twinStatus === 'unregistered' && (
         <View style={[ss.noticeBar, { backgroundColor: '#f59e0b20', borderColor: '#f59e0b',
@@ -904,7 +732,7 @@ export default function TwinScreen() {
       {/* FAB */}
       <TouchableOpacity
         style={[ss.fab, { backgroundColor: mode === 'dashboard' ? c.active : '#ef4444',
-          bottom: insets.bottom + 75 }]}
+          bottom: insets.bottom + -5 }]}
         onPress={() => switchMode(mode === 'dashboard' ? 'routine' : 'dashboard')}>
         <Animated.View style={{ transform: [{ rotate: fabAnim.interpolate({ inputRange: [0, 1], outputRange: ['0deg', '45deg'] }) }] }}>
           <Ionicons name="add" size={32} color="#fff" />

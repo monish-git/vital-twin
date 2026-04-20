@@ -1,49 +1,81 @@
+//_layout.tsx
+
 ///////////////////////////////////////////////////////////
 // ⚠️ FIRST IMPORTS — KEEP THIS ORDER
 ///////////////////////////////////////////////////////////
 import "../services/foregroundStepService";
 import "../tasks/stepTrackingTask";
 
-// ✅ MUST be before app mounts
-import { registerNotifeeBackgroundHandler } from "../services/notifeeService";
-registerNotifeeBackgroundHandler();
-
 ///////////////////////////////////////////////////////////
 
 import { Stack } from "expo-router";
 import React, { useEffect, useRef, useState } from "react";
 import { ActivityIndicator, View } from "react-native";
+import * as SplashScreen from "expo-splash-screen";
 
+///////////////////////////////////////////////////////////
+// CONTEXT PROVIDERS
+///////////////////////////////////////////////////////////
 import { BiogearsTwinProvider } from "../context/BiogearsTwinContext";
 import { HydrationProvider } from "../context/HydrationContext";
 import { MedicineProvider } from "../context/MedicineContext";
 import { NutritionProvider } from "../context/NutritionContext";
-import { ProfileProvider } from "../context/ProfileContext";
+import { ProfileProvider, useProfile } from "../context/ProfileContext";
 import { StepProvider } from "../context/StepContext";
 import { SymptomsProvider } from "../context/SymptomContext";
 import { ThemeProvider } from "../context/ThemeContext";
+import { FamilyProvider } from "../context/FamilyContext";
 
-import * as SplashScreen from "expo-splash-screen";
-
-import { initHistoryTable } from "../database/historySchema";
-import { initHydrationDB } from "../database/hydrationDB";
-import { initMedicineDB } from "../database/medicineDB";
+///////////////////////////////////////////////////////////
+// DATABASE INITIALIZATION
+///////////////////////////////////////////////////////////
 import { initDB } from "../database/schema";
+import { initHistoryTable } from "../database/historySchema";
+import { initMedicineDB, markMissedMedicines } from "../database/medicineDB";
 import { initSymptomDB } from "../database/symptomDB";
+import { initHydrationDB } from "../database/hydrationDB";
+import { initHydrationHistoryDB } from "../database/hydrationHistoryDB"; // ✅ Moved here
 
+///////////////////////////////////////////////////////////
+// SERVICES
+///////////////////////////////////////////////////////////
 import { syncMedicinesFromFirebase } from "../services/medicineSync";
-
 import {
   registerNotifeeForegroundHandler,
   setupNotifee,
 } from "../services/notifeeService";
 
-import { markMissedMedicines } from "../database/medicineDB";
+///////////////////////////////////////////////////////////
+// UTILITIES
+///////////////////////////////////////////////////////////
+import { log, error } from "../utils/logger";
 
 ///////////////////////////////////////////////////////////
-SplashScreen.preventAutoHideAsync();
+// PREVENT AUTO HIDE OF SPLASH SCREEN
 ///////////////////////////////////////////////////////////
+SplashScreen.preventAutoHideAsync().catch(() => {});
 
+///////////////////////////////////////////////////////////
+// STEP PROVIDER WRAPPER
+///////////////////////////////////////////////////////////
+const StepProviderWrapper: React.FC<{ children: React.ReactNode }> = ({
+  children,
+}) => {
+  const profile = useProfile();
+
+  const weightKg = profile?.weightKg ?? 70;
+  const heightCm = profile?.heightCm ?? 170;
+
+  return (
+    <StepProvider weightKg={weightKg} heightCm={heightCm}>
+      {children}
+    </StepProvider>
+  );
+};
+
+///////////////////////////////////////////////////////////
+// ROOT LAYOUT
+///////////////////////////////////////////////////////////
 export default function RootLayout() {
   const initialized = useRef(false);
   const [isReady, setIsReady] = useState(false);
@@ -57,31 +89,38 @@ export default function RootLayout() {
 
     const setupApp = async () => {
       try {
-        console.log("🚀 Initializing App...");
+        log("🚀 Initializing VitalTwin App...");
 
-        // ✅ NOTIFICATIONS
+        /////////////////////////////////////////////////////
+        // 🔔 SETUP NOTIFICATIONS
+        /////////////////////////////////////////////////////
         await setupNotifee();
+        console.log("🔔 Notifications initialized");
 
-        // ✅ DATABASE
+        await new Promise((res) => setTimeout(res, 500));
+
+        /////////////////////////////////////////////////////
+        // 🗄️ INITIALIZE DATABASES
+        /////////////////////////////////////////////////////
         await initDB();
         await initHistoryTable();
         await initMedicineDB();
         await initSymptomDB();
         await initHydrationDB();
+        await initHydrationHistoryDB(); 
 
-        // ✅ 🔥 MARK MISSED MEDICINES (FIXED POSITION)
+        /////////////////////////////////////////////////////
+        // 🔄 POST-INITIALIZATION TASKS
+        /////////////////////////////////////////////////////
         await markMissedMedicines();
-
-        // ✅ FIREBASE SYNC
         await syncMedicinesFromFirebase();
 
-        console.log("🔥 App Fully Initialized");
-
-      } catch (error) {
-        console.log("❌ Startup error:", error);
+        log("🔥 VitalTwin App Fully Initialized");
+      } catch (err: any) {
+        error("❌ Startup error:", err as Error);
       } finally {
         setIsReady(true);
-        await SplashScreen.hideAsync();
+        await SplashScreen.hideAsync().catch(() => {});
       }
     };
 
@@ -90,6 +129,8 @@ export default function RootLayout() {
 
   ///////////////////////////////////////////////////////////
   // FOREGROUND NOTIFICATION HANDLER
+  // ✅ Registered here only — NOT in index.js
+  // index.js only handles the background handler (onBackgroundEvent)
   ///////////////////////////////////////////////////////////
   useEffect(() => {
     const unsubscribe = registerNotifeeForegroundHandler();
@@ -117,37 +158,54 @@ export default function RootLayout() {
   }
 
   ///////////////////////////////////////////////////////////
-  // MAIN NAVIGATION
+  // MAIN NAVIGATION WITH CONTEXT PROVIDERS
   ///////////////////////////////////////////////////////////
   return (
     <ThemeProvider defaultTheme="light">
       <ProfileProvider>
-        <MedicineProvider>
-          <BiogearsTwinProvider>
-            <StepProvider>
-              <HydrationProvider>
-                <SymptomsProvider>
-                  <NutritionProvider>
-                    <Stack screenOptions={{ headerShown: false }}>
-                      <Stack.Screen name="startup" />
-                      <Stack.Screen name="welcome" />
-                      <Stack.Screen name="signin" />
-                      <Stack.Screen name="signup" />
-                      <Stack.Screen name="onboarding/personal" />
-                      <Stack.Screen name="onboarding/medical" />
-                      <Stack.Screen name="onboarding/habits" />
-                      <Stack.Screen name="onboarding/history" />
-                      <Stack.Screen name="onboarding/review" />
-                      <Stack.Screen name="(tabs)" />
-                      <Stack.Screen name="MedicationVault" />
-                      <Stack.Screen name="member-health" />
-                    </Stack>
-                  </NutritionProvider>
-                </SymptomsProvider>
-              </HydrationProvider>
-            </StepProvider>
-          </BiogearsTwinProvider>
-        </MedicineProvider>
+        <FamilyProvider>
+          <StepProviderWrapper>
+            <HydrationProvider>
+              <MedicineProvider>
+                <BiogearsTwinProvider>
+                  <SymptomsProvider>
+                    <NutritionProvider>
+                      <Stack screenOptions={{ headerShown: false }}>
+                        {/* Authentication & Startup */}
+                        <Stack.Screen name="startup" />
+                        <Stack.Screen name="welcome" />
+                        <Stack.Screen name="signin" />
+                        <Stack.Screen name="signup" />
+
+                        {/* Onboarding */}
+                        <Stack.Screen name="onboarding/personal" />
+                        <Stack.Screen name="onboarding/medical" />
+                        <Stack.Screen name="onboarding/habits" />
+                        <Stack.Screen name="onboarding/history" />
+                        <Stack.Screen name="onboarding/review" />
+
+                        {/* Main App Tabs */}
+                        <Stack.Screen name="(tabs)" />
+
+                        {/* Family Health Screens */}
+                        <Stack.Screen name="family/index" />
+                        <Stack.Screen name="family/member-details" />
+
+                        {/* Additional Screens */}
+                        <Stack.Screen name="MedicationVault" />
+                        <Stack.Screen name="member-health" />
+                        <Stack.Screen name="symptom-log" />
+                        <Stack.Screen name="symptom-flow" />
+                        <Stack.Screen name="symptom-followup" />
+                        <Stack.Screen name="symptom-chat" />
+                      </Stack>
+                    </NutritionProvider>
+                  </SymptomsProvider>
+                </BiogearsTwinProvider>
+              </MedicineProvider>
+            </HydrationProvider>
+          </StepProviderWrapper>
+        </FamilyProvider>
       </ProfileProvider>
     </ThemeProvider>
   );

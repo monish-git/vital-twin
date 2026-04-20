@@ -7,7 +7,7 @@
 import { Ionicons } from "@expo/vector-icons";
 import Slider from "@react-native-community/slider";
 import { LinearGradient } from "expo-linear-gradient";
-import { useRouter } from "expo-router";
+import { useRouter } from "expo-router"; 
 import React, { useMemo, useState } from "react";
 import {
   Alert,
@@ -22,6 +22,7 @@ import {
 import { ActivityEntry, useNutrition } from "../context/NutritionContext";
 import { useProfile } from "../context/ProfileContext";
 import { useTheme } from "../context/ThemeContext";
+import { useBiogearsTwin } from "../context/BiogearsTwinContext";
 
 // ─── MET table ───────────────────────────────────────────────────────────────
 // MET (Metabolic Equivalent of Task) values per activity per intensity level
@@ -147,7 +148,17 @@ export default function ActivityLab() {
   const router  = useRouter();
   const { theme } = useTheme();
   const { weightKg } = useProfile();
-  const { activityEntries, addActivityEntry, removeActivityEntry, totals, totalActivityCalories, netCalories, selectedProfile } = useNutrition();
+  const {
+    activityEntries,
+    addActivityEntry,
+    removeActivityEntry,
+    totals,
+    totalActivityCalories,
+    netCalories,
+    selectedProfile,
+  } = useNutrition();
+
+  const { addEvent } = useBiogearsTwin();
 
   const colors = theme === "light"
     ? { bg: "#f8fafc", card: "#ffffff", text: "#020617", subText: "#64748b", accent: "#0ea5e9", border: "#e2e8f0", active: "#0ea5e9" }
@@ -193,6 +204,7 @@ export default function ActivityLab() {
   const surplus = totals.calories - selectedProfile.recommendations.calories + totalActivityCalories;
 
   const handleConfirm = () => {
+    // Log to Nutrition Context
     addActivityEntry({
       activityName:   selected,
       activityIcon:   selectedIcon,
@@ -201,10 +213,31 @@ export default function ActivityLab() {
       caloriesBurned: previewBurn,
       met,
     });
+
+    // Log to Bio-GARES Digital Twin
+    try {
+      const now = new Date();
+      const wallTime = now.toTimeString().slice(0, 5); // HH:MM format
+
+      addEvent({
+        event_type: "exercise",
+        value: MET_TABLE[selected]?.[intensity] ?? 0.5,
+        duration_seconds: duration * 60,
+        wallTime,
+        displayLabel: `${selected} · ${duration} min (${intensity})`,
+        displayIcon: selectedIcon,
+      });
+    } catch (error) {
+      console.error("BioGears Activity Sync Error:", error);
+    }
+
     Alert.alert(
       "✅ Activity Logged!",
       `${selectedIcon} ${selected} — ${previewBurn} kcal burned in ${duration} min`,
-      [{ text: "View Log", onPress: () => setShowLog(true) }, { text: "Done", onPress: () => router.back() }]
+      [
+        { text: "View Log", onPress: () => setShowLog(true) },
+        { text: "Done", onPress: () => router.back() },
+      ]
     );
   };
 

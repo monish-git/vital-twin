@@ -8,7 +8,8 @@ import * as ImagePicker from "expo-image-picker";
 import { LinearGradient } from "expo-linear-gradient";
 import { useFocusEffect, useRouter } from "expo-router";
 import React, { useEffect, useRef, useState } from "react";
-import {
+import { useFamily } from "../context/FamilyContext";
+import { 
   ActivityIndicator,
   Alert,
   Animated,
@@ -40,12 +41,13 @@ import { auth } from "../services/firebase";
 import { findUserByHealthId } from "../services/firebaseService";
 import { BiogearsRegistrationPayload } from "../services/biogears";
 import { UserProfile } from "../services/profileService";
+import { FamilyMember } from "../types/FamilyMember"; // ✅ FIX: Import shared type instead of declaring locally
 import Header from "./components/Header";
+import { log, error } from "../utils/logger";
 
 const { width } = Dimensions.get("window");
 
 // ─── Types ────────────────────────────────────────────────────────────────────
-
 type AppSettings = {
   notifications: boolean;
   darkMode: boolean;
@@ -54,19 +56,25 @@ type AppSettings = {
   language: string;
 };
 
-type FamilyMember = {
-  id: string;
-  firstName: string;
-  lastName: string;
-  relation: string;
-  profileImage?: string;
-  inviteCode: string;
-  status: "active" | "pending";
-  bloodGroup?: string;
-  age?: string;
-};
+// ✅ FIX: REMOVED duplicate local FamilyMember type definition.
+// It was shadowing the shared type from types/FamilyMember.ts and causing
+// structural mismatches with FamilyContext's addMember() — ts(2345).
 
 // ─────────────────────────────────────────────────────────────────────────────
+
+// ✅ STEP 1: Helper to extract a valid ID from any member type
+const getMemberId = (member: FamilyMember | LinkedMember): string => {
+  if ("id" in member && member.id) {
+    return member.id.toString();
+  }
+  if ("uid" in member && member.uid) {
+    return member.uid.toString();
+  }
+  if ("userId" in member && member.userId) {
+    return member.userId.toString();
+  }
+  throw new Error("Invalid member: No ID found");
+};
 
 export default function ProfileScreen() {
   const router = useRouter();
@@ -111,13 +119,12 @@ export default function ProfileScreen() {
       };
 
   // ── Profile from Context ──────────────────────────────────────────────────
+  const { addMember, removeMember, members } = useFamily();
 
   const { profile, updateProfile, isLoaded, isProfileComplete, resetProfile, reloadProfile } = useProfile();
   const { twinStatus, twinStatusError, simulationProgress, registerTwin } = useBiogearsTwin();
 
   // ✅ FIX: Re-read from AsyncStorage every time this page gains focus.
-  // Without this, context loads once on app start and never picks up
-  // the profile saved by review.tsx during onboarding.
   useFocusEffect(
     React.useCallback(() => {
       reloadProfile();
@@ -173,8 +180,6 @@ export default function ProfileScreen() {
   });
 
   // ── Family State ───────────────────────────────────────────────────────────
-
-  const [familyMembers, setFamilyMembers] = useState<FamilyMember[]>([]);
   const [myInviteCode, setMyInviteCode] = useState<string>("");
   const [activeMemberId, setActiveMemberId]   = useState<string>("self");
   const [addMemberModal, setAddMemberModal]   = useState(false);
@@ -188,17 +193,14 @@ export default function ProfileScreen() {
   const [linkedMembers,     setLinkedMembers]     = useState<LinkedMember[]>([]);
 
   // ── Modal State ────────────────────────────────────────────────────────────
-
   const [editProfileModal, setEditProfileModal]  = useState(false);
   const [editMedicalModal, setEditMedicalModal]  = useState(false);
   const [emergencyModal,   setEmergencyModal]    = useState(false);
   const fadeAnim = useRef(new Animated.Value(0)).current;
 
   // ── Load / Save ────────────────────────────────────────────────────────────
-
   useEffect(() => {
     loadSettings();
-    loadFamilyMembers();
     loadMyInviteCode();
     loadLinkedMembers();
     requestPermissions();
@@ -218,48 +220,32 @@ export default function ProfileScreen() {
     } catch (e) { console.log(e); }
   };
 
-  const loadFamilyMembers = async () => {
-    try {
-      const saved = await AsyncStorage.getItem("familyMembers");
-      if (saved) setFamilyMembers(JSON.parse(saved));
-      const activeId = await AsyncStorage.getItem("activeMemberId");
-      if (activeId) setActiveMemberId(activeId);
-    } catch (e) { console.log(e); }
-  };
-
   // ✅ Generate a unique invite code based on user name, persist it so it never changes
   const loadMyInviteCode = async () => {
     try {
       const stored = await AsyncStorage.getItem("myInviteCode");
-      // ✅ Regenerate if old VH- format or not set yet
       if (stored && stored.startsWith("VT-")) {
         setMyInviteCode(stored);
-        // ✅ Make sure it's saved to Firebase profile so others can find us
-        await updateProfile({ inviteCode: stored } as any);
+        await updateProfile({ inviteCode: stored });
       } else {
-        // Generate new code based on Firebase UID
         const code = generateMyCode(safeProfile.firstName, safeProfile.lastName);
         await AsyncStorage.setItem("myInviteCode", code);
         setMyInviteCode(code);
-        // ✅ Save to Firebase profile — this is what others search for
-        await updateProfile({ inviteCode: code } as any);
+        await updateProfile({ inviteCode: code });
         console.log("✅ Generated new invite code:", code);
       }
     } catch (e) { console.log(e); }
   };
 
   // ✅ Format: VT-<first4ofUID>-<last4ofUID>
-  // Based on Firebase UID — 100% unique per user, never changes
   const generateMyCode = (firstName: string, lastName: string): string => {
     const user = auth.currentUser;
     if (user?.uid) {
-      // Use first 4 and last 4 chars of Firebase UID
       const uid   = user.uid.replace(/-/g, "");
       const part1 = uid.substring(0, 4).toUpperCase();
       const part2 = uid.substring(uid.length - 4).toUpperCase();
       return `VT-${part1}-${part2}`;
     }
-    // Fallback if auth not ready — use initials + timestamp
     const f = (firstName?.charAt(0) || "U").toUpperCase();
     const l = (lastName?.charAt(0)  || "X").toUpperCase();
     const ts = Date.now().toString().slice(-6);
@@ -268,10 +254,39 @@ export default function ProfileScreen() {
 
   const loadLinkedMembers = async () => {
     try {
-      const members = await fetchLinkedMembers();
-      setLinkedMembers(members);
-      console.log("✅ Linked members loaded:", members.length);
-    } catch (e) { console.log(e); }
+      const fetchedMembers = await fetchLinkedMembers();
+      setLinkedMembers(fetchedMembers);
+
+      // ✅ FIX: Sync with FamilyContext using ?? "" to guarantee string types,
+      // resolving ts(2345) — FamilyMember requires firstName: string (not undefined)
+      for (const member of fetchedMembers) {
+        const id =
+          member.uid?.toString() ||
+          member.userId?.toString() ||
+          member.id?.toString();
+
+        if (!id) continue;
+
+        const exists = members.some((m) => m.id === id);
+
+        if (!exists) {
+          await addMember({
+            id,
+            uid: id,
+            userId: id,
+            firstName: member.firstName ?? "",   // ✅ FIX: guarantee string, never undefined
+            lastName: member.lastName ?? "",     // ✅ FIX: guarantee string, never undefined
+            relation: member.relation || "Family",
+            inviteCode: member.inviteCode || "",
+            status: member.status || "active",
+          });
+        }
+      }
+
+      console.log("✅ Linked members loaded and synced:", fetchedMembers.length);
+    } catch (e) {
+      console.log("❌ Error loading linked members:", e);
+    }
   };
 
   // ✅ STEP 1: FIXED saveProfileData() with proper emergencyContact handling and reload
@@ -287,8 +302,6 @@ export default function ProfileScreen() {
       });
 
       setLocalProfile(newProfile);
-      
-      // ✅ FORCE RELOAD AFTER SAVE
       await reloadProfile();
       
       console.log("✅ Profile saved correctly and reloaded:", newProfile);
@@ -304,19 +317,12 @@ export default function ProfileScreen() {
     } catch (e) { console.log(e); }
   };
 
-  const saveFamilyMembers = async (members: FamilyMember[]) => {
-    try {
-      await AsyncStorage.setItem("familyMembers", JSON.stringify(members));
-      setFamilyMembers(members);
-    } catch (e) { console.log(e); }
-  };
-
   // ── Family Actions ─────────────────────────────────────────────────────────
 
   const switchToMember = (memberId: string) => {
-    const member = familyMembers.find(m => m.id === memberId);
-    if (!member || member.status === "pending") {
-      Alert.alert("Pending", "This member hasn't accepted the invite yet.");
+    const member = members.find(m => m.id === memberId);
+    if (!member) {
+      Alert.alert("Error", "Member not found.");
       return;
     }
 
@@ -337,17 +343,22 @@ export default function ProfileScreen() {
     }
   };
 
-  // ✅ FIX 1 — openMemberProfile FUNCTION
-  const openMemberProfile = (member: any) => {
-    const userId = "id" in member ? member.id : member.uid;
+  // ✅ STEP 2: UPDATED openMemberProfile FUNCTION with getMemberId helper
+  const openMemberProfile = (member: FamilyMember | LinkedMember) => {
+    try {
+      const userId = getMemberId(member);
 
-    router.push({
-      pathname: "/member-health",
-      params: {
-        userId,
-        name: `${member.firstName} ${member.lastName}`,
-      },
-    });
+      router.push({
+        pathname: "/member-health",
+        params: {
+          userId,
+          name: `${member.firstName ?? ""} ${member.lastName ?? ""}`.trim(),
+        },
+      });
+    } catch (error) {
+      Alert.alert("Error", "Invalid member selected.");
+      console.error("Navigation Error:", error);
+    }
   };
 
   const generateInviteCode = (firstName: string, lastName: string) => {
@@ -365,14 +376,10 @@ export default function ProfileScreen() {
       return;
     }
 
-     console.log("Entered Health ID:", newMemberHealthId);
-
     setSearchLoading(true);
     setSearchError("");
 
     try {
-      console.log("🔍 Searching user...");
-
       const found = await findUserByHealthId(newMemberHealthId.trim());
 
       if (!found) {
@@ -380,46 +387,40 @@ export default function ProfileScreen() {
         return;
       }
 
-      // ✅ CREATE MEMBER OBJECT
-      const newMember: FamilyMember = {
-  id: found.uid,
-  firstName: found.firstName,
-  lastName: found.lastName,
-  relation: newMemberRelation || "Family",
-  inviteCode: newMemberHealthId,
-  status: "active" as "active", // ✅ FIX
-};
+      if (members.some((m) => m.id === found.uid)) {
+        Alert.alert("Already Added", "This member is already linked.");
+        return;
+      }
 
-      // ✅ UPDATE STATE
-      const updatedMembers = [...familyMembers, newMember];
-      setFamilyMembers(updatedMembers);
+      await addMember({
+        id: found.uid,
+        uid: found.uid,
+        userId: found.uid,
+        firstName: found.firstName ?? "",   // ✅ FIX: guarantee string
+        lastName: found.lastName ?? "",     // ✅ FIX: guarantee string
+        relation: newMemberRelation || "Family",
+        inviteCode: found.inviteCode || "",
+        status: "active",
+      });
 
-      // ✅ SAVE TO STORAGE
-      await AsyncStorage.setItem(
-        "familyMembers",
-        JSON.stringify(updatedMembers)
-      );
+      await loadLinkedMembers();
 
-      // ✅ CLOSE MODAL + RESET
       setAddMemberModal(false);
       setNewMemberName("");
       setNewMemberHealthId("");
       setNewMemberRelation("");
       setSearchError("");
 
-      console.log("✅ Member added");
-
       Alert.alert("Success", "Family member added successfully!");
-
     } catch (e) {
       console.log("❌ Error:", e);
-      setSearchError("Something went wrong");
+      setSearchError("Something went wrong.");
     } finally {
       setSearchLoading(false);
     }
   };
 
-  // ✅ FIX 3 — REMOVE MEMBER (LONG PRESS)
+  // ✅ STEP 4: UPDATED REMOVE MEMBER FUNCTION
   const removeFamilyMember = (id: string) => {
     Alert.alert(
       "Remove Member",
@@ -430,13 +431,13 @@ export default function ProfileScreen() {
           text: "Remove",
           style: "destructive",
           onPress: async () => {
-            // ✅ Remove from Firebase (two-way)
             await unlinkFamilyMember(id);
-            // ✅ Reload
+            await removeMember(id);
             await loadLinkedMembers();
+
             if (activeMemberId === id) {
               setActiveMemberId("self");
-              AsyncStorage.setItem("activeMemberId", "self");
+              await AsyncStorage.setItem("activeMemberId", "self");
             }
           },
         },
@@ -477,15 +478,10 @@ export default function ProfileScreen() {
   };
 
   // ── Active member banner ───────────────────────────────────────────────────
-  const activeMember = familyMembers.find(m => m.id === activeMemberId);
+  const activeMember = members.find(m => m.id === activeMemberId);
   const isViewingOther = activeMemberId !== "self";
 
-  // ─────────────────────────────────────────────────────────────────────────
-  // RENDER HELPERS
-  // ─────────────────────────────────────────────────────────────────────────
-
-  // ✅ FIX: Loading check is now AFTER all hooks (React rules require this)
-  // Also shows a proper spinner instead of hanging forever
+  // ✅ FIX: Loading check is now AFTER all hooks
   if (!isLoaded) {
     return (
       <View style={[styles.container, { flex: 1, justifyContent: "center", alignItems: "center" }]}>
@@ -536,19 +532,16 @@ export default function ProfileScreen() {
 
       <View style={styles.profileStats}>
         <View style={styles.statItem}>
-          {/* ✅ STEP 2: FIX EMPTY DISPLAY with fallback */}
           <Text style={styles.statValue}>{safeProfile.height || "--"}</Text>
           <Text style={styles.statLabel}>Height</Text>
         </View>
         <View style={styles.statDivider} />
         <View style={styles.statItem}>
-          {/* ✅ STEP 2: FIX EMPTY DISPLAY with fallback */}
           <Text style={styles.statValue}>{safeProfile.weight || "--"}</Text>
           <Text style={styles.statLabel}>Weight</Text>
         </View>
         <View style={styles.statDivider} />
         <View style={styles.statItem}>
-          {/* ✅ STEP 2: FIX EMPTY DISPLAY with fallback */}
           <Text style={styles.statValue}>{safeProfile.bloodGroup || "--"}</Text>
           <Text style={styles.statLabel}>Blood</Text>
         </View>
@@ -602,7 +595,6 @@ export default function ProfileScreen() {
   };
 
   const handleRegisterTwin = async () => {
-    // 1. Mandatory Field Validation (Check localProfile which has current modal state)
     const missing = [];
     if (!localProfile.firstName) missing.push("First Name");
     if (!localProfile.lastName) missing.push("Last Name");
@@ -624,7 +616,6 @@ export default function ProfileScreen() {
     }
 
     try {
-      // 2. Save current modal state to profile context FIRST
       await saveProfileData(localProfile);
 
       const generatedId = getTwinId(localProfile);
@@ -657,7 +648,6 @@ export default function ProfileScreen() {
         [{ text: "Great!", onPress: () => closeModal(setEditMedicalModal) }]
       );
     } catch (err: any) {
-      // Error handled by context/API logging
       Alert.alert("Calibration Failed", err.message || "Could not reach BioGears server.");
     }
   };
@@ -841,11 +831,9 @@ export default function ProfileScreen() {
         showsHorizontalScrollIndicator={false}
         contentContainerStyle={styles.memberScroll}
       >
-        {/* ✅ UPDATED: Show both linked members from Firebase AND local family members */}
-        {[...linkedMembers, ...familyMembers].map((member) => (
+        {members.map((member) => (
           <TouchableOpacity
-            // ✅ FIX 2 — key IN MEMBER CARD
-            key={"id" in member ? member.id : member.uid}
+            key={member.id}
             style={[styles.memberCard, {
               backgroundColor: colors.familyBg,
               borderColor: colors.familyBorder,
@@ -861,8 +849,7 @@ export default function ProfileScreen() {
                   {
                     text: "Remove",
                     style: "destructive",
-                    // ✅ FIX 3 — REMOVE MEMBER (LONG PRESS)
-                    onPress: () => removeFamilyMember("id" in member ? member.id : member.uid),
+                    onPress: () => removeFamilyMember(member.id),
                   },
                 ]
               );
@@ -871,7 +858,8 @@ export default function ProfileScreen() {
           >
             <View style={[styles.memberAvatar, { backgroundColor: colors.purple }]}>
               <Text style={styles.memberAvatarText}>
-                {member.firstName.charAt(0)}{member.lastName?.charAt(0) ?? ""}
+                {member.firstName?.charAt(0) ?? ""}
+                {member.lastName?.charAt(0) ?? ""}
               </Text>
             </View>
 
@@ -879,7 +867,7 @@ export default function ProfileScreen() {
               {member.firstName}
             </Text>
             <Text style={[styles.memberRelation, { color: colors.subText }]}>
-              {member.relation}
+              {member.relation ?? "Family"}
             </Text>
 
             <View style={[styles.memberStatusPill, { backgroundColor: colors.success + "20" }]}>
@@ -901,7 +889,7 @@ export default function ProfileScreen() {
         </TouchableOpacity>
       </ScrollView>
 
-      {/* ✅ My Unique Invite Code — generated from user name, persisted forever */}
+      {/* ✅ My Unique Invite Code */}
       <View style={[styles.myCodeBox, { backgroundColor: colors.familyBg, borderColor: colors.familyBorder }]}>
         <View style={styles.myCodeLeft}>
           <View style={[styles.myCodeIconBox, { backgroundColor: colors.purple + "20" }]}>
@@ -918,7 +906,6 @@ export default function ProfileScreen() {
           </View>
         </View>
         <View style={styles.myCodeActions}>
-          {/* Copy button */}
           <TouchableOpacity
             style={[styles.codeActionBtn, { backgroundColor: colors.accent + "20" }]}
             onPress={() => {
@@ -927,7 +914,6 @@ export default function ProfileScreen() {
           >
             <Ionicons name="copy-outline" size={16} color={colors.accent} />
           </TouchableOpacity>
-          {/* Share button */}
           <TouchableOpacity
             style={[styles.codeActionBtn, { backgroundColor: colors.purple }]}
             onPress={() => {
@@ -973,12 +959,8 @@ export default function ProfileScreen() {
             text: "Logout",
             style: "destructive",
             onPress: async () => {
-              // ✅ FIX: Clear storage AND reset context in-memory state
-              // Without resetProfile(), old user data stays in context
-              // and shows up when a new user signs up in the same session
               await AsyncStorage.clear();
               await resetProfile();
-              // ✅ Sign out from Firebase
               try { await signOut(auth); } catch (e) { console.log(e); }
               router.replace("/welcome");
             },
@@ -1040,7 +1022,6 @@ export default function ProfileScreen() {
               >
                 <Text style={[styles.modalButtonText, { color: colors.text }]}>Cancel</Text>
               </TouchableOpacity>
-              {/* ✅ FIX: Save localProfile (the edited version), not the stale profile */}
               <TouchableOpacity
                 style={[styles.modalButton, { backgroundColor: colors.accent }]}
                 onPress={() => { saveProfileData(localProfile); closeModal(setEditProfileModal); }}
@@ -1057,7 +1038,6 @@ export default function ProfileScreen() {
         <BlurView intensity={80} style={styles.modalOverlay}>
           <Animated.View style={[styles.modalCard, { opacity: fadeAnim, backgroundColor: colors.card }]}>
             <Text style={[styles.modalTitle, { color: colors.text }]}>Emergency Contact</Text>
-            {/* ✅ FIX 4: Remove "Not set" default value */}
             <TextInput
               placeholder="Contact Name"
               placeholderTextColor={colors.subText}
@@ -1065,9 +1045,9 @@ export default function ProfileScreen() {
               value={localProfile?.emergencyContact?.name || ""}
               onChangeText={(text) =>
                 setLocalProfile({ ...localProfile, emergencyContact: {
-  ...(localProfile.emergencyContact || {}),
-  name: text
-} })
+                  ...(localProfile.emergencyContact || {}),
+                  name: text
+                }})
               }
             />
             <TextInput
@@ -1078,9 +1058,9 @@ export default function ProfileScreen() {
               keyboardType="phone-pad"
               onChangeText={(text) =>
                 setLocalProfile({ ...localProfile, emergencyContact: {
-  ...(localProfile.emergencyContact || {}),
-  phone: text
-} })
+                  ...(localProfile.emergencyContact || {}),
+                  phone: text
+                }})
               }
             />
             <TextInput
@@ -1090,9 +1070,9 @@ export default function ProfileScreen() {
               value={localProfile?.emergencyContact?.relation || ""}
               onChangeText={(text) =>
                 setLocalProfile({ ...localProfile, emergencyContact: {
-  ...(localProfile.emergencyContact || {}),
-  relation: text
-} })
+                  ...(localProfile.emergencyContact || {}),
+                  relation: text
+                }})
               }
             />
             <View style={styles.modalButtons}>
@@ -1102,7 +1082,6 @@ export default function ProfileScreen() {
               >
                 <Text style={[styles.modalButtonText, { color: colors.text }]}>Cancel</Text>
               </TouchableOpacity>
-              {/* ✅ FIX: Save localProfile */}
               <TouchableOpacity
                 style={[styles.modalButton, { backgroundColor: colors.accent }]}
                 onPress={() => { saveProfileData(localProfile); closeModal(setEmergencyModal); }}
@@ -1400,7 +1379,6 @@ export default function ProfileScreen() {
               Enter their name and VitalTwin Health ID to link your health data.
             </Text>
 
-            {/* Name */}
             <TextInput
               placeholder="Their Name (e.g., Rahul)"
               placeholderTextColor={colors.subText}
@@ -1409,21 +1387,19 @@ export default function ProfileScreen() {
               onChangeText={setNewMemberName}
             />
 
-            {/* Health ID */}
             <TextInput
               placeholder="Their Health ID (e.g., VT-AB12-3456)"
               placeholderTextColor={colors.subText}
               style={[styles.input, { backgroundColor: colors.bg, color: colors.text }]}
               value={newMemberHealthId}
               onChangeText={(t) => {
-  const formatted = t.toUpperCase().replace(/\s/g, "-");
-  setNewMemberHealthId(formatted);
-  setSearchError("");
-}}
+                const formatted = t.toUpperCase().replace(/\s/g, "-");
+                setNewMemberHealthId(formatted);
+                setSearchError("");
+              }}
               autoCapitalize="characters"
             />
 
-            {/* Relation (optional) */}
             <TextInput
               placeholder="Relation (optional — e.g., Father, Friend)"
               placeholderTextColor={colors.subText}
@@ -1432,14 +1408,12 @@ export default function ProfileScreen() {
               onChangeText={setNewMemberRelation}
             />
 
-            {/* Error message */}
             {searchError ? (
               <Text style={[styles.searchError, { color: colors.danger }]}>
                 ⚠️ {searchError}
               </Text>
             ) : null}
 
-            {/* How it works */}
             <View style={[styles.howItWorks, { backgroundColor: colors.familyBg, borderColor: colors.familyBorder }]}>
               <Text style={[styles.howItWorksTitle, { color: colors.text }]}>How it works</Text>
               {[

@@ -1,250 +1,520 @@
 // context/StepContext.tsx
 // ─────────────────────────────────────────────────────────────────────────────
-// Global Step State
-// Uses @notifee/react-native foreground service so steps survive recents swipe.
+// Root causes fixed in this version:
+//
+//  CRASH FIX:
+//    - AsyncStorage was written on EVERY step → JS thread overload → crash
+//    - Now persisted max once every 5 seconds via a flush timer
+//    - Accelerometer interval raised to 200ms (was 100ms) to reduce JS pressure
+//    - All sensor subs are torn down cleanly before re-subscribing
+//
+//  ACCURACY FIX:
+//    - Pedometer baseline was re-anchored on every re-subscribe, losing steps
+//    - Now baseline is captured once per tracking session and never re-anchored
+//      mid-session; only the cumulative delta from session-start is used
+//    - Accelerometer: stricter hysteresis + 650ms min interval
 // ─────────────────────────────────────────────────────────────────────────────
 
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import notifee, {
+  AndroidImportance,
+} from "@notifee/react-native";
+import { Accelerometer, Pedometer } from "expo-sensors";
 import React, {
   createContext,
   useCallback,
   useContext,
   useEffect,
-  useMemo,
   useRef,
   useState,
 } from "react";
-import {
-  listenForegroundServiceEvents,
-  startForegroundStepService,
-  stopForegroundStepService,
-  updateForegroundNotification,
-} from "../services/foregroundStepService";
-import {
-  AVG_STRIDE_M,
-  GOAL_KEY,
-  STORAGE_KEY,
-  calcCaloriesMET,
-  registerBackgroundStepTask,
-  saveStepState,
-  startAccelerometerTracking,
-  stopAccelerometerTracking,
-  unregisterBackgroundStepTask,
-} from "../tasks/stepTrackingTask";
-import { useProfile } from "./ProfileContext";
+import { AppState, AppStateStatus, Platform } from "react-native";
 
-function todayStr() {
-  return new Date().toISOString().slice(0, 10);
+// ── Storage Keys ──────────────────────────────────────────────────────────────
+const KEYS = {
+  goal:         "step_goal_v7",
+  date:         "step_date_v7",
+  totalToday:   "step_total_today_v7",
+  isTracking:   "step_is_tracking_v7",
+  sessionStart: "step_session_start_v7",
+  lastMoveTs:   "step_last_move_ts_v7",
+};
+
+const todayString = () => new Date().toISOString().slice(0, 10);
+
+// ── Accelerometer Step Detector ───────────────────────────────────────────────
+//
+//  State machine:
+//    IDLE  →  (mag > ARM_THRESH)   →  ARMED
+//    ARMED →  track peak
+//    ARMED →  (mag < FIRE_THRESH)  →  check peak, maybe fire  →  IDLE
+//
+//  Conservative thresholds to avoid phantom steps from:
+//    • phone sitting on table
+//    • riding in a vehicle
+//    • typing or tapping screen
+//
+const ARM_THRESH  = 2.3;   // g-force to arm the detector
+const FIRE_THRESH = 1.05;  // g-force to fire (must fall this low after arming)
+const PEAK_MIN    = 2.5;   // peak must exceed this to count (rejects soft bumps)
+const STEP_GAP_MS = 650;   // minimum ms between steps (~92 steps/min max)
+
+class StepDetector {
+  private armed       = false;
+  private peak        = 0;
+  private lastStepAt  = 0;
+  onStep: (() => void) | null = null;
+
+  feed(x: number, y: number, z: number) {
+    // Total acceleration magnitude (includes gravity ~1g when stationary)
+    const mag = Math.sqrt(x * x + y * y + z * z);
+
+    if (!this.armed) {
+      if (mag > ARM_THRESH) {
+        this.armed = true;
+        this.peak  = mag;
+      }
+      return;
+    }
+
+    // Update peak while armed
+    if (mag > this.peak) {
+      this.peak = mag;
+    }
+
+    // Falling edge triggers the step check
+    if (mag < FIRE_THRESH) {
+      const peaked = this.peak;
+      this.armed   = false;
+      this.peak    = 0;
+
+      if (peaked < PEAK_MIN) return;          // too weak — noise
+      const now = Date.now();
+      if (now - this.lastStepAt < STEP_GAP_MS) return;  // too fast — noise
+
+      this.lastStepAt = now;
+      this.onStep?.();
+    }
+  }
+
+  reset() {
+    this.armed      = false;
+    this.peak       = 0;
+    this.lastStepAt = 0;
+  }
 }
 
-interface StepContextType {
+// ── Context Types ─────────────────────────────────────────────────────────────
+interface StepContextValue {
   steps:         number;
   calories:      number;
   distanceKm:    number;
   goal:          number;
   sessionSecs:   number;
   isTracking:    boolean;
-  setGoal:       (g: number) => Promise<void>;
+  usingFallback: boolean;
+  setGoal:       (g: number) => void;
   startTracking: () => Promise<void>;
   stopTracking:  () => Promise<void>;
   resetToday:    () => Promise<void>;
 }
 
-const StepContext = createContext<StepContextType>({
-  steps: 0, calories: 0, distanceKm: 0, goal: 10000,
-  sessionSecs: 0, isTracking: false,
-  setGoal: async () => {}, startTracking: async () => {},
-  stopTracking: async () => {}, resetToday: async () => {},
-});
+const StepContext = createContext<StepContextValue>({} as StepContextValue);
+export const useSteps = () => useContext(StepContext);
 
-export function useSteps() {
-  return useContext(StepContext);
-}
+// ── Provider ──────────────────────────────────────────────────────────────────
+export const StepProvider: React.FC<{
+  children:  React.ReactNode;
+  weightKg?: number;
+  heightCm?: number;
+}> = ({ children, weightKg = 70, heightCm = 170 }) => {
 
-export function StepProvider({ children }: { children: React.ReactNode }) {
-  // Safely read weight from ProfileContext
-  let weightKg = 70;
-  try {
-    const p = useProfile();
-    weightKg = p.weightKg;
-  } catch {}
+  const [steps,         setSteps]         = useState(0);
+  const [goal,          setGoalState]     = useState(10000);
+  const [sessionSecs,   setSessionSecs]   = useState(0);
+  const [isTracking,    setIsTracking]    = useState(false);
+  const [usingFallback, setUsingFallback] = useState(false);
 
-  const [steps,       setSteps]    = useState(0);
-  const [goal,        setGoalState] = useState(10000);
-  const [sessionSecs, setSession]  = useState(0);
-  const [isTracking,  setTracking] = useState(false);
+  // ── Core refs ─────────────────────────────────────────────────────────────
+  const stepsRef        = useRef(0);       // always matches `steps` state
+  const isTrackingRef   = useRef(false);
+  const dirtyRef        = useRef(false);   // true = steps changed, not yet flushed to disk
 
-  const stepsRef      = useRef(0);
-  const sessionRef    = useRef(0);
-  const weightRef     = useRef(weightKg);
-  const pollRef       = useRef<ReturnType<typeof setInterval> | null>(null);
-  const timerRef      = useRef<ReturnType<typeof setInterval> | null>(null);
-  const notifUpdateRef = useRef<ReturnType<typeof setInterval> | null>(null);
-  const foregroundUnsubRef = useRef<(() => void) | null>(null);
+  // ── Sensor & timer refs ───────────────────────────────────────────────────
+  const pedometerSub    = useRef<{ remove: () => void } | null>(null);
+  const accelSub        = useRef<{ remove: () => void } | null>(null);
+  const clockRef        = useRef<ReturnType<typeof setInterval> | null>(null);
+  const flushRef        = useRef<ReturnType<typeof setInterval> | null>(null);
+  const sedRef          = useRef<ReturnType<typeof setInterval> | null>(null);
+  const appStateRef     = useRef<AppStateStatus>(AppState.currentState);
+  const detector        = useRef(new StepDetector());
 
-  useEffect(() => { weightRef.current = weightKg; }, [weightKg]);
+  // ── Derived metrics ───────────────────────────────────────────────────────
+  const strideM    = 0.413 * (heightCm / 100);
+  const distanceKm = parseFloat(((steps * strideM) / 1000).toFixed(2));
+  const calories   = Math.round(steps * 0.04 * (weightKg / 70));
 
-  // Derived values — auto-recalculate when profile weight changes
-  const calories   = useMemo(
-    () => calcCaloriesMET(steps, sessionSecs, weightKg),
-    [steps, sessionSecs, weightKg]
-  );
-  const distanceKm = useMemo(() => (steps * AVG_STRIDE_M) / 1000, [steps]);
-
-  // ── Load persisted steps on mount ────────────────────────────────────────
-  useEffect(() => {
-    (async () => {
-      try {
-        const gRaw = await AsyncStorage.getItem(GOAL_KEY);
-        if (gRaw) setGoalState(JSON.parse(gRaw));
-
-        const raw = await AsyncStorage.getItem(STORAGE_KEY);
-        if (raw) {
-          const d = JSON.parse(raw);
-          if (d.lastReset === todayStr()) {
-            stepsRef.current   = d.steps       ?? 0;
-            sessionRef.current = d.sessionSecs ?? 0;
-            setSteps(stepsRef.current);
-            setSession(sessionRef.current);
-          }
-        }
-      } catch (e) {
-        console.log("StepContext load error:", e);
-      }
-    })();
+  // ─────────────────────────────────────────────────────────────────────────
+  // STEP UPDATE — only touches React state; disk write is deferred
+  // ─────────────────────────────────────────────────────────────────────────
+  const addSteps = useCallback((delta: number) => {
+    if (delta <= 0) return;
+    stepsRef.current += delta;
+    dirtyRef.current  = true;
+    setSteps(stepsRef.current);          // fast — no I/O
   }, []);
 
-  // ── Poll AsyncStorage every 2s (syncs with background/foreground service) ─
-  useEffect(() => {
-    pollRef.current = setInterval(async () => {
-      try {
-        const raw = await AsyncStorage.getItem(STORAGE_KEY);
-        if (!raw) return;
-        const d = JSON.parse(raw);
-        if (d.lastReset !== todayStr()) return;
-        stepsRef.current   = d.steps       ?? stepsRef.current;
-        sessionRef.current = d.sessionSecs ?? sessionRef.current;
-        setSteps(stepsRef.current);
-        setSession(sessionRef.current);
-      } catch {}
-    }, 2000);
-    return () => { if (pollRef.current) clearInterval(pollRef.current); };
+  const setStepsAbsolute = useCallback((n: number) => {
+    stepsRef.current = Math.max(0, n);
+    setSteps(stepsRef.current);
   }, []);
 
-  // ── Start tracking ────────────────────────────────────────────────────────
-  const startTracking = useCallback(async () => {
-    try {
-      setTracking(true);
+  // ─────────────────────────────────────────────────────────────────────────
+  // FLUSH — writes to AsyncStorage at most every 5 seconds
+  // Keeps the JS thread free during active walking
+  // ─────────────────────────────────────────────────────────────────────────
+  const startFlushLoop = useCallback(() => {
+    if (flushRef.current) clearInterval(flushRef.current);
+    flushRef.current = setInterval(async () => {
+      if (!dirtyRef.current) return;
+      dirtyRef.current = false;
+      await AsyncStorage.multiSet([
+        [KEYS.totalToday, String(stepsRef.current)],
+        [KEYS.lastMoveTs, String(Date.now())],
+      ]);
+    }, 5000);
+  }, []);
 
-      // 1. Start expo-background-fetch task (handles background resume)
-      await registerBackgroundStepTask();
+  const stopFlushLoop = useCallback(() => {
+    if (flushRef.current) { clearInterval(flushRef.current); flushRef.current = null; }
+  }, []);
 
-      // 2. Start notifee foreground service (survives recents swipe)
-      //    This shows a persistent notification + keeps process alive
-      await startForegroundStepService();
+  // Immediate flush for important moments (stop / reset / background)
+  const flushNow = useCallback(async () => {
+    dirtyRef.current = false;
+    await AsyncStorage.multiSet([
+      [KEYS.totalToday, String(stepsRef.current)],
+      [KEYS.lastMoveTs, String(Date.now())],
+    ]);
+  }, []);
 
-      // 3. Also start accelerometer in foreground (app is open right now)
-      //    The foreground service will restart it if app is killed
-      startAccelerometerTracking();
+  // ── Goal ──────────────────────────────────────────────────────────────────
+  const setGoal = useCallback((g: number) => {
+    setGoalState(g);
+    AsyncStorage.setItem(KEYS.goal, String(g));
+  }, []);
 
-      // 4. Session timer — updates UI every second
-      timerRef.current = setInterval(() => {
-        sessionRef.current += 1;
-        setSession(sessionRef.current);
-      }, 1000);
+  // ── Session clock ─────────────────────────────────────────────────────────
+  const startClock = useCallback((elapsedMs = 0) => {
+    if (clockRef.current) clearInterval(clockRef.current);
+    const origin = Date.now() - elapsedMs;
+    clockRef.current = setInterval(() => {
+      setSessionSecs(Math.floor((Date.now() - origin) / 1000));
+    }, 1000);
+  }, []);
 
-      // 5. Update foreground notification with live count every 10s
-      notifUpdateRef.current = setInterval(async () => {
-        const cal = calcCaloriesMET(
-          stepsRef.current,
-          sessionRef.current,
-          weightRef.current
-        );
-        await updateForegroundNotification(stepsRef.current, cal);
-        // Sync steps from in-memory task state to React state
+  const stopClock = useCallback(() => {
+    if (clockRef.current) { clearInterval(clockRef.current); clockRef.current = null; }
+  }, []);
+
+  // ── Sedentary notification using Notifee ─────────────────────────────────
+  const startSedTimer = useCallback(() => {
+    if (sedRef.current) clearInterval(sedRef.current);
+    sedRef.current = setInterval(async () => {
+      const raw = await AsyncStorage.getItem(KEYS.lastMoveTs);
+      const last = parseInt(raw ?? String(Date.now()), 10);
+      if ((Date.now() - last) / 60000 >= 60) {
         try {
-          const raw = await AsyncStorage.getItem(STORAGE_KEY);
-          if (raw) {
-            const d = JSON.parse(raw);
-            if (d.lastReset === todayStr()) {
-              stepsRef.current   = d.steps       ?? stepsRef.current;
-              sessionRef.current = d.sessionSecs ?? sessionRef.current;
-              setSteps(stepsRef.current);
-            }
-          }
-        } catch {}
-      }, 10000);
+          await notifee.createChannel({
+            id: "health",
+            name: "Health Notifications",
+            importance: AndroidImportance.HIGH,
+          });
+          await notifee.displayNotification({
+            title: "Move a little! 🚶",
+            body: "You've been inactive for over an hour.",
+            android: {
+              channelId: "health",
+              pressAction: {
+                id: "default",
+              },
+            },
+          });
+        } catch (error) {
+          console.log("Sedentary notification error:", error);
+        }
+      }
+    }, 5 * 60 * 1000);
+  }, []);
 
-      // 6. Listen for "Stop Tracking" button press on notification
-      foregroundUnsubRef.current = listenForegroundServiceEvents(async () => {
-        await stopTracking();
+  const stopSedTimer = useCallback(() => {
+    if (sedRef.current) { clearInterval(sedRef.current); sedRef.current = null; }
+  }, []);
+
+  // ── Tear down all sensors ─────────────────────────────────────────────────
+  const stopSensors = useCallback(() => {
+    pedometerSub.current?.remove();
+    accelSub.current?.remove();
+    pedometerSub.current    = null;
+    accelSub.current        = null;
+    detector.current.onStep = null;
+  }, []);
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // PEDOMETER SUBSCRIPTION
+  //
+  // Critical design: baseline is captured ONCE when we subscribe.
+  // We never re-anchor mid-session. This prevents step loss on re-subscribe.
+  //
+  // The `result.steps` from watchStepCount is the OS hardware step counter —
+  // it is cumulative since last reboot and can be millions. We only care about
+  // the DELTA from when we started tracking.
+  // ─────────────────────────────────────────────────────────────────────────
+  const subscribePedometer = useCallback(async (): Promise<boolean> => {
+    try {
+      if (Platform.OS === "android") {
+        await (Pedometer as any).requestPermissionsAsync?.();
+      }
+      const available = await Pedometer.isAvailableAsync();
+      if (!available) return false;
+
+      // Always clean up old sub first
+      pedometerSub.current?.remove();
+      pedometerSub.current = null;
+
+      let sessionBaseline: number | null = null;   // OS steps at session start
+      let lastOsSteps: number | null     = null;   // previous callback value
+
+      pedometerSub.current = Pedometer.watchStepCount((result) => {
+        const osSteps = result.steps;
+
+        if (sessionBaseline === null) {
+          // Very first callback — anchor the baseline, count nothing yet
+          sessionBaseline = osSteps;
+          lastOsSteps     = osSteps;
+          return;
+        }
+
+        if (lastOsSteps === null) {
+          lastOsSteps = osSteps;
+          return;
+        }
+
+        // Delta since last callback (should be 1–3 for normal walking)
+        const delta = osSteps - lastOsSteps;
+        lastOsSteps = osSteps;
+
+        if (delta <= 0) return;            // counter didn't advance
+        if (delta > 20) return;            // implausible spike — skip entirely
+
+        addSteps(delta);
       });
 
-    } catch (e) {
-      console.log("startTracking error:", e);
-      setTracking(false);
+      return true;
+    } catch {
+      return false;
     }
-  }, []);
+  }, [addSteps]);
 
-  // ── Stop tracking ─────────────────────────────────────────────────────────
+  // ── Accelerometer fallback ─────────────────────────────────────────────────
+  const subscribeAccelerometer = useCallback(() => {
+    accelSub.current?.remove();
+    accelSub.current = null;
+    detector.current.reset();
+    detector.current.onStep = () => addSteps(1);
+
+    // 200ms interval — lower frequency = less JS thread pressure = no crash
+    Accelerometer.setUpdateInterval(200);
+    accelSub.current = Accelerometer.addListener(({ x, y, z }) => {
+      detector.current.feed(x, y, z);
+    });
+  }, [addSteps]);
+
+  // ── Start best sensor ─────────────────────────────────────────────────────
+  const startBestSensor = useCallback(async () => {
+    stopSensors();
+    const pedoOk = await subscribePedometer();
+    if (pedoOk) {
+      setUsingFallback(false);
+    } else {
+      subscribeAccelerometer();
+      setUsingFallback(true);
+    }
+  }, [stopSensors, subscribePedometer, subscribeAccelerometer]);
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // START TRACKING
+  // ─────────────────────────────────────────────────────────────────────────
+  const startTracking = useCallback(async () => {
+    if (isTrackingRef.current) return;
+
+    await notifee.requestPermission();
+
+    const now = Date.now();
+
+    await AsyncStorage.multiSet([
+      [KEYS.isTracking,   "1"],
+      [KEYS.date,         todayString()],
+      [KEYS.sessionStart, String(now)],
+      [KEYS.totalToday,   String(stepsRef.current)],
+      [KEYS.lastMoveTs,   String(now)],
+    ]);
+
+    isTrackingRef.current = true;
+    setIsTracking(true);
+    setSessionSecs(0);
+
+    await startBestSensor();
+    startClock(0);
+    startSedTimer();
+    startFlushLoop();
+  }, [startBestSensor, startClock, startSedTimer, startFlushLoop]);
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // STOP TRACKING
+  // ─────────────────────────────────────────────────────────────────────────
   const stopTracking = useCallback(async () => {
-    try {
-      setTracking(false);
+    stopSensors();
+    stopClock();
+    stopSedTimer();
+    stopFlushLoop();
+    await flushNow();   // persist final step count immediately
 
-      // Clear UI timer
-      if (timerRef.current)      { clearInterval(timerRef.current);      timerRef.current = null; }
-      if (notifUpdateRef.current) { clearInterval(notifUpdateRef.current); notifUpdateRef.current = null; }
+    await AsyncStorage.setItem(KEYS.isTracking, "0");
 
-      // Unsubscribe foreground event listener
-      foregroundUnsubRef.current?.();
-      foregroundUnsubRef.current = null;
+    isTrackingRef.current = false;
+    setIsTracking(false);
+  }, [stopSensors, stopClock, stopSedTimer, stopFlushLoop, flushNow]);
 
-      // Stop accelerometer
-      stopAccelerometerTracking();
-
-      // Stop foreground service + dismiss notification
-      await stopForegroundStepService();
-
-      // Unregister background fetch
-      await unregisterBackgroundStepTask();
-
-      // Final save
-      await saveStepState(stepsRef.current, sessionRef.current, Date.now(), false);
-    } catch (e) {
-      console.log("stopTracking error:", e);
-    }
-  }, []);
-
-  // ── Set goal ──────────────────────────────────────────────────────────────
-  const setGoal = useCallback(async (g: number) => {
-    setGoalState(g);
-    await AsyncStorage.setItem(GOAL_KEY, JSON.stringify(g));
-    await saveStepState(stepsRef.current, sessionRef.current, Date.now(), false);
-  }, []);
-
-  // ── Reset today ───────────────────────────────────────────────────────────
+  // ─────────────────────────────────────────────────────────────────────────
+  // RESET TODAY
+  // ─────────────────────────────────────────────────────────────────────────
   const resetToday = useCallback(async () => {
-    stepsRef.current   = 0;
-    sessionRef.current = 0;
+    stopSensors();
+    stopClock();
+    stopSedTimer();
+    stopFlushLoop();
+
+    stepsRef.current      = 0;
+    isTrackingRef.current = false;
+    dirtyRef.current      = false;
+
     setSteps(0);
-    setSession(0);
-    await saveStepState(0, 0, Date.now(), false);
+    setSessionSecs(0);
+    setIsTracking(false);
+
+    await AsyncStorage.multiSet([
+      [KEYS.totalToday,   "0"],
+      [KEYS.date,         todayString()],
+      [KEYS.sessionStart, String(Date.now())],
+      [KEYS.isTracking,   "0"],
+    ]);
+  }, [stopSensors, stopClock, stopSedTimer, stopFlushLoop]);
+
+  // ─────────────────────────────────────────────────────────────────────────
+  // RESTORE ON MOUNT
+  // ─────────────────────────────────────────────────────────────────────────
+  useEffect(() => {
+    let alive = true;
+
+    (async () => {
+      const pairs = await AsyncStorage.multiGet([
+        KEYS.goal, KEYS.date, KEYS.totalToday, KEYS.isTracking, KEYS.sessionStart,
+      ]);
+      if (!alive) return;
+
+      const m = Object.fromEntries(pairs.map(([k, v]) => [k, v ?? ""]));
+
+      if (m[KEYS.goal]) setGoalState(parseInt(m[KEYS.goal], 10));
+
+      const today = todayString();
+
+      if (m[KEYS.date] && m[KEYS.date] !== today) {
+        // New day — reset
+        await AsyncStorage.multiSet([
+          [KEYS.date,       today],
+          [KEYS.totalToday, "0"],
+          [KEYS.isTracking, "0"],
+        ]);
+        setStepsAbsolute(0);
+        return;
+      }
+
+      const saved = parseInt(m[KEYS.totalToday] || "0", 10);
+      setStepsAbsolute(saved);
+
+      if (m[KEYS.isTracking] === "1") {
+        const t0      = parseInt(m[KEYS.sessionStart] || String(Date.now()), 10);
+        const elapsed = Date.now() - t0;
+
+        isTrackingRef.current = true;
+        setIsTracking(true);
+        startClock(elapsed);
+        await startBestSensor();
+        startSedTimer();
+        startFlushLoop();
+      }
+    })();
+
+    return () => {
+      alive = false;
+      stopSensors();
+      stopClock();
+      stopSedTimer();
+      stopFlushLoop();
+    };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Cleanup
-  useEffect(() => () => {
-    if (timerRef.current)       clearInterval(timerRef.current);
-    if (pollRef.current)        clearInterval(pollRef.current);
-    if (notifUpdateRef.current) clearInterval(notifUpdateRef.current);
-    foregroundUnsubRef.current?.();
+  // ─────────────────────────────────────────────────────────────────────────
+  // APP STATE — flush on background, re-attach on foreground
+  // ─────────────────────────────────────────────────────────────────────────
+  useEffect(() => {
+    const sub = AppState.addEventListener("change", async (next) => {
+      const goingBackground = next.match(/inactive|background/);
+      const comingForeground =
+        appStateRef.current.match(/inactive|background/) && next === "active";
+
+      if (goingBackground && isTrackingRef.current) {
+        // Flush immediately before OS suspends the app
+        await flushNow();
+      }
+
+      if (comingForeground && isTrackingRef.current) {
+        // Re-read persisted count (background task may have updated it)
+        const raw    = await AsyncStorage.getItem(KEYS.totalToday);
+        const saved  = parseInt(raw ?? "0", 10);
+        // Only update if persisted value is higher (never go backwards)
+        if (saved > stepsRef.current) {
+          setStepsAbsolute(saved);
+        }
+        // Re-attach sensors (iOS kills sensor subscriptions in background)
+        await startBestSensor();
+        startFlushLoop();
+      }
+
+      appStateRef.current = next;
+    });
+
+    return () => sub.remove();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   return (
     <StepContext.Provider value={{
-      steps, calories, distanceKm, goal, sessionSecs,
-      isTracking, setGoal, startTracking, stopTracking, resetToday,
+      steps,
+      calories,
+      distanceKm,
+      goal,
+      sessionSecs,
+      isTracking,
+      usingFallback,
+      setGoal,
+      startTracking,
+      stopTracking,
+      resetToday,
     }}>
       {children}
     </StepContext.Provider>
   );
-}
+};

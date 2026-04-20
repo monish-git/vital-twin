@@ -6,7 +6,7 @@ import {
   Alert,
   ScrollView,
   StyleSheet,
-  Switch,
+  Switch, 
   Text,
   TextInput,
   TouchableOpacity,
@@ -18,7 +18,7 @@ import DateTimePicker from "@react-native-community/datetimepicker";
 import { useRouter } from "expo-router";
 
 import { useMedicine } from "../context/MedicineContext";
-import { addToMedicineHistory } from "../utils/medicineHistory";
+import { log, error } from "../utils/logger"; import { addToMedicineHistory } from "../utils/medicineHistory";
 import { useTheme } from "./../context/ThemeContext";
 import { colors } from "./../theme/colors";
 
@@ -37,6 +37,7 @@ export default function AddMedicine() {
 
   const [time, setTime] = useState(new Date());
   const [showPicker, setShowPicker] = useState(false);
+  const [saving, setSaving] = useState(false);
 
   const formatted = time.toLocaleTimeString([], {
     hour: "2-digit",
@@ -44,119 +45,122 @@ export default function AddMedicine() {
     hour12: true,
   });
 
- const save = async () => {
-  if (!name.trim()) {
-    Alert.alert("Missing Information", "Please enter medicine name");
-    return;
-  }
+  const save = async () => {
+    if (saving) return; // 🚫 prevent multiple clicks
+    
+    if (!name.trim()) {
+      Alert.alert("Missing Information", "Please enter medicine name");
+      return;
+    }
 
-  if (!dose.trim()) {
-    Alert.alert("Missing Information", "Please enter dosage");
-    return;
-  }
+    if (!dose.trim()) {
+      Alert.alert("Missing Information", "Please enter dosage");
+      return;
+    }
 
-  try {
-    /////////////////////////////////////////////////
-    // BUILD TIMESTAMP FROM SELECTED TIME
-    /////////////////////////////////////////////////
+    try {
+      setSaving(true);
+      
+      /////////////////////////////////////////////////
+      // BUILD TIMESTAMP FROM SELECTED TIME
+      /////////////////////////////////////////////////
 
-    const now = new Date();
+      const now = new Date();
 
-    const selectedDate = new Date(
-      now.getFullYear(),
-      now.getMonth(),
-      now.getDate(),
-      time.getHours(),
-      time.getMinutes(),
-      0,
-      0
-    );
+      const selectedDate = new Date(
+        now.getFullYear(),
+        now.getMonth(),
+        now.getDate(),
+        time.getHours(),
+        time.getMinutes(),
+        0,
+        0
+      );
 
-    const timestamp = selectedDate.getTime();
+      const timestamp = selectedDate.getTime();
 
-    /////////////////////////////////////////////////
-    // DERIVED DATABASE FIELDS
-    /////////////////////////////////////////////////
+      /////////////////////////////////////////////////
+      // DERIVED DATABASE FIELDS
+      /////////////////////////////////////////////////
 
-    const type = "tablet"; // default (future: dropdown)
-    const frequency = schedule === "regular" ? "daily" : "once";
+      const type = "tablet"; // default (future: dropdown)
+      const frequency = schedule === "regular" ? "daily" : "once";
 
-    const startDate = now.toISOString();
+      const startDate = now.toISOString();
 
-    const endDate =
-      schedule === "once"
-        ? selectedDate.toISOString()
-        : "ongoing";
+      const endDate =
+        schedule === "once"
+          ? selectedDate.toISOString()
+          : "ongoing";
 
-    /////////////////////////////////////////////////
-    // SAVE INTO DATABASE VIA CONTEXT
-    /////////////////////////////////////////////////
+      /////////////////////////////////////////////////
+      // SAVE INTO DATABASE VIA CONTEXT
+      /////////////////////////////////////////////////
 
-  console.log("Adding medicine:", name, frequency);
+      log("Adding medicine:", name.trim(), frequency);
 
-await addMedicine(
-  name,
-  dose,
-  type,
-  formatted,
-  timestamp,
-  meal,
-  frequency,
-  startDate,
-  endDate,
-  reminder ? 1 : 0
-);
+      await addMedicine(
+        name.trim(),
+        dose.trim(),
+        type,
+        formatted,
+        timestamp,
+        meal,
+        frequency,
+        startDate,
+        endDate,
+        reminder ? 1 : 0
+      );
 
-console.log("Medicine added successfully");
+      log("Medicine added successfully");
 
-    /////////////////////////////////////////////////
-    // ADD TO MEDICINE HISTORY
-    /////////////////////////////////////////////////
+      /////////////////////////////////////////////////
+      // ADD TO MEDICINE HISTORY
+      /////////////////////////////////////////////////
 
-  await addToMedicineHistory({
-  medicineId: Date.now(),
-  medicineName: name,
-  dose: dose,
-  time: formatted,
-  status: "taken"
-});
+      await addToMedicineHistory({
+        medicineId: Date.now(),
+        medicineName: name.trim(),
+        dose: dose.trim(),
+        time: formatted,
+        status: "taken"
+      });
 
-    /////////////////////////////////////////////////
-    // SUCCESS MESSAGE
-    /////////////////////////////////////////////////
+      /////////////////////////////////////////////////
+      // SUCCESS MESSAGE
+      /////////////////////////////////////////////////
 
-    const scheduleText =
-      schedule === "regular" ? "daily" : "one-time";
+      const scheduleText =
+        schedule === "regular" ? "daily" : "one-time";
 
-    Alert.alert(
-      "Success",
-      `${name} has been added as a ${scheduleText} medicine`,
-      [{ text: "OK", onPress: () => router.back() }]
-    );
+      Alert.alert(
+        "Success",
+        `${name.trim()} has been added as a ${scheduleText} medicine`,
+        [{ text: "OK", onPress: () => router.back() }]
+      );
 
-  } catch (err) {
-    console.log("Save error:", err);
-    Alert.alert("Error", "Failed to save medicine");
-  }
-};
-
+    } catch (err) {
+      error("Save error:", err as Error);
+      Alert.alert("Error", "Failed to save medicine");
+    } finally {
+      setSaving(false); // ✅ reset loading
+    }
+  };
 
   ///////////////////////////////////////////////////////////
 
   const getScheduleDescription = () => {
-  return schedule === "regular"
-    ? "You'll be reminded every day at this time"
-    : "You'll be reminded once today at this time";
-};
+    return schedule === "regular"
+      ? "You'll be reminded every day at this time"
+      : "You'll be reminded once today at this time";
+  };
 
-
-const testReminder = () => {
-  Alert.alert(
-    "Reminder Preview",
-    "Time to take your medicine"
-  );
-};
-
+  const testReminder = () => {
+    Alert.alert(
+      "Reminder Preview",
+      "Time to take your medicine"
+    );
+  };
 
   return (
     <View style={[styles.container, { backgroundColor: c.bg }]}>
@@ -427,11 +431,19 @@ const testReminder = () => {
           <TouchableOpacity
             style={[
               styles.saveBtn,
-              { backgroundColor: c.accent },
+              {
+                backgroundColor: saving ? "#999" : c.accent,
+                opacity: saving ? 0.7 : 1,
+              },
             ]}
             onPress={save}
+            disabled={saving}
           >
-            <Text style={styles.saveText}>SAVE</Text>
+            {saving ? (
+              <Text style={styles.saveText}>SAVING...</Text>
+            ) : (
+              <Text style={styles.saveText}>SAVE</Text>
+            )}
           </TouchableOpacity>
         </View>
       </View>

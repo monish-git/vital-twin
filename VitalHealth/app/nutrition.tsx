@@ -28,6 +28,7 @@ import {
   useNutrition,
 } from "../context/NutritionContext";
 import { useTheme } from "../context/ThemeContext";
+import { useBiogearsTwin } from "../context/BiogearsTwinContext";
 
 const GOAL = 2000;
 
@@ -48,6 +49,8 @@ export default function NutritionScreen() {
     updateReminderTime,
     getMealEntries,
   } = useNutrition();
+
+  const { addEvent } = useBiogearsTwin();
 
   const { calories, protein, carbs, fat, sugar, sodium, fiber } = totals;
 
@@ -106,6 +109,8 @@ export default function NutritionScreen() {
   // ── Food entry helpers ────────────────────────────────────────────────────
   const handleAddFood = (food: typeof foodDatabase[0]) => {
     if (!selectedMeal) return;
+
+    // Add to Nutrition Context
     addFoodEntry({
       mealId:   selectedMeal.id,
       foodId:   food.id,
@@ -118,6 +123,33 @@ export default function NutritionScreen() {
       sodium:   food.sodium,
       fiber:    food.fiber,
     });
+
+    // Sync with Bio-GARES Digital Twin
+    try {
+      const now = new Date();
+      const wallTime = now.toTimeString().slice(0, 5);
+
+      addEvent({
+  event_type: "meal",
+  value: food.calories,
+  wallTime,
+  meal_type: selectedMeal.id as
+    | "balanced"
+    | "high_carb"
+    | "high_protein"
+    | "fast_food"
+    | "ketogenic"
+    | "custom",
+  carb_g: food.carbs,
+  fat_g: food.fat,
+  protein_g: food.protein,
+  displayLabel: `${selectedMeal.label} · ${food.name} (${food.calories} kcal)`,
+  displayIcon: selectedMeal.icon,
+});
+    } catch (error) {
+      console.error("BioGears Nutrition Sync Error:", error);
+    }
+
     setShowFoodPicker(false);
     setModalVisible(false);
     Alert.alert("Added", `${food.name} added to ${selectedMeal.label}`);
@@ -127,6 +159,8 @@ export default function NutritionScreen() {
     if (!selectedMeal || !customFood || !customCalories) return;
     const cal = parseInt(customCalories);
     if (isNaN(cal)) return;
+
+    // Add to Nutrition Context
     addFoodEntry({
       mealId:   selectedMeal.id,
       foodId:   `custom_${Date.now()}`,
@@ -134,6 +168,30 @@ export default function NutritionScreen() {
       calories: cal,
       protein: 0, carbs: 0, fat: 0, sugar: 0, sodium: 0, fiber: 0,
     });
+
+    // Sync with Bio-GARES Digital Twin
+    try {
+      const now = new Date();
+      const wallTime = now.toTimeString().slice(0, 5);
+
+      addEvent({
+  event_type: "meal",
+  value: cal,
+  wallTime,
+  meal_type: selectedMeal.id as
+    | "balanced"
+    | "high_carb"
+    | "high_protein"
+    | "fast_food"
+    | "ketogenic"
+    | "custom",
+  displayLabel: `${selectedMeal.label} · ${customFood} (${cal} kcal)`,
+  displayIcon: selectedMeal.icon,
+});
+    } catch (error) {
+      console.error("BioGears Nutrition Sync Error:", error);
+    }
+
     setCustomFood("");
     setCustomCalories("");
     setModalVisible(false);

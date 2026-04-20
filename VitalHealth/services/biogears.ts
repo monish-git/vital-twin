@@ -5,7 +5,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
-const DEFAULT_BASE_URL = 'http://10.185.33.79:8000';  // Using Host IP instead of 10.0.2.2 for reliability
+const DEFAULT_BASE_URL = 'http://10.66.213.41:8000';  // Using Host IP instead of 10.0.2.2 for reliability
 const BASE_URL_KEY = '@biogears_base_url';
 
 export async function getBiogearsBaseUrl(): Promise<string> {
@@ -14,7 +14,7 @@ export async function getBiogearsBaseUrl(): Promise<string> {
     const url = stored || DEFAULT_BASE_URL;
     
     if (url.includes('10.0.2.2') && !stored) {
-      console.warn('[BioGears] WARNING: Using 10.0.2.2 which often fails on Windows. Consider using 10.185.33.79');
+      console.warn('[BioGears] WARNING: Using 10.0.2.2 which often fails on Windows. Consider using 10.66.213.41');
     }
     
     console.log(`[BioGears] Using Base URL: ${url}`);

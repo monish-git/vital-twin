@@ -12,18 +12,24 @@ import {
   View,
 } from "react-native";
 
-import { useSymptoms } from "../context/SymptomContext";
 import { useTheme } from "../context/ThemeContext";
 import { SymptomAnalysis, symptomDB, SymptomOption } from "../data/symptomData";
+import { useSymptoms } from "../context/SymptomContext";
+
 
 
 export default function SymptomFlow() {
   const router = useRouter();
-  const { type } = useLocalSearchParams(); 
+  const params = useLocalSearchParams<{
+  type?: string | string[];
+}>();
+const { logSymptom, refreshSymptoms } = useSymptoms();
+const type = Array.isArray(params.type)
+  ? params.type[0]
+  : params.type; // ✅ FIXED
   const { theme } = useTheme();
-  const { logSymptom } = useSymptoms();
 
-  const symptom = symptomDB[type as string];
+  const symptom = type ? symptomDB[type] : undefined; // ✅ FIXED
 
   const colors = theme === "light" ? {
     bg: "#f8fafc",
@@ -49,12 +55,12 @@ export default function SymptomFlow() {
   const [fadeAnim] = useState(new Animated.Value(1));
 
   if (!symptom) {
-    return (
-      <View style={[styles.container, { backgroundColor: colors.bg }]}>
-        <Text>Symptom not found</Text>
-      </View>
-    );
-  }
+  return (
+    <View style={[styles.container, { backgroundColor: colors.bg, justifyContent: "center", alignItems: "center" }]}>
+      <Text style={{ fontSize: 18 }}>Symptom not found</Text>
+    </View>
+  );
+}
 
   const handleSelectOption = (optionId: string) => {
     if (selectedOptions.includes(optionId)) {
@@ -106,48 +112,54 @@ export default function SymptomFlow() {
   };
 
   const saveSymptom = async () => {
-    try {
-      // Combine selected options and answers into a JSON string
-      const followUpAnswers = JSON.stringify({
-        options: selectedOptions,
-        ...answers,
-      });
-
-      console.log("Saving symptom:", symptom.label, analysis?.severity || "mild");
-      
-      await logSymptom(
-  symptom.label,
-  analysis?.severity || "mild",
-  60,                     // ⏰ 60 minutes follow-up
-  undefined,              // no notes
-  followUpAnswers         // actual answers
-);
-      
-      console.log("Symptom saved successfully!");
-
-      Alert.alert(
-        "Symptom Logged",
-        "You'll receive hourly check-ins until resolved.",
-        [
-          {
-            text: "View Home",
-            onPress: () => router.replace("/(tabs)"),
-          },
-          {
-            text: "OK",
-            style: "cancel",
-          },
-        ]
-      );
-    } catch (error) {
-      console.log("Error saving symptom:", error);
-      Alert.alert(
-        "Error",
-        "Failed to save symptom. Please try again.",
-        [{ text: "OK" }]
-      );
+  try {
+    if (!type) {
+      Alert.alert("Error", "Invalid symptom type.");
+      return;
     }
-  };
+
+    if (!analysis) {
+      Alert.alert("Error", "Analysis not completed.");
+      return;
+    }
+
+    const selectedOptionId =
+      selectedOptions.length > 0 ? selectedOptions[0] : "general";
+
+    const followUpAnswers = JSON.stringify({
+      options: selectedOptions,
+      ...answers,
+    });
+
+    console.log("Saving symptom via context...");
+
+    // ✅ Save using SymptomContext
+    await logSymptom(
+      type,
+      selectedOptionId,
+      symptom.label,
+      analysis.severity || "mild",
+      30,
+      "",
+      followUpAnswers
+    );
+
+    // Refresh Home Page data
+    await refreshSymptoms();
+
+    console.log("✅ Symptom logged successfully");
+
+    Alert.alert("Symptom Logged", "Saved successfully!", [
+      {
+        text: "Go to Home",
+        onPress: () => router.replace("/(tabs)"),
+      },
+    ]);
+  } catch (error) {
+    console.error("❌ Error saving symptom:", error);
+    Alert.alert("Error", "Failed to save symptom.");
+  }
+};
 
   const renderOptions = () => (
     <Animated.View style={{ opacity: fadeAnim }}>
@@ -203,7 +215,16 @@ export default function SymptomFlow() {
 
       <TouchableOpacity
         style={[styles.nextButton, { backgroundColor: colors.accent }]}
-        onPress={() => setStep('questions')}
+        onPress={() => {
+  if (selectedOptions.length === 0) {
+    Alert.alert(
+      "Select a Symptom",
+      "Please select at least one symptom to continue."
+    );
+    return;
+  }
+  setStep("questions");
+}}
       >
         <Text style={styles.nextButtonText}>Next: Answer Questions</Text>
         <Ionicons name="arrow-forward" size={20} color="#fff" />
@@ -398,13 +419,13 @@ export default function SymptomFlow() {
         )}
 
         {analysis?.seeDoctor && (
-  <View style={[styles.doctorNote, { backgroundColor: "#ef444420" }]}>
-    <Ionicons name="alert-circle" size={22} color="#ef4444" />
-    <Text style={[styles.doctorNoteText, { color: "#ef4444" }]}>
-      ⚠️ SEEK MEDICAL ATTENTION IMMEDIATELY
-    </Text>
-  </View>
-)}  
+          <View style={[styles.doctorNote, { backgroundColor: "#ef444420" }]}>
+            <Ionicons name="alert-circle" size={22} color="#ef4444" />
+            <Text style={[styles.doctorNoteText, { color: "#ef4444" }]}>
+              ⚠️ SEEK MEDICAL ATTENTION IMMEDIATELY
+            </Text>
+          </View>
+        )}  
       </View>
 
       <View style={styles.actionButtons}>

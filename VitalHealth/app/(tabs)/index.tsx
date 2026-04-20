@@ -16,6 +16,9 @@ import { useSymptoms } from "../../context/SymptomContext";
 import { useTheme } from "../../context/ThemeContext";
 import { colors } from "../../theme/colors";
 import Header from "../components/Header";
+import { doc, onSnapshot } from "firebase/firestore";
+import { db } from "../../services/firebase";
+import { getUserId } from "../../services/firebaseSync";
 
 
 const { width } = Dimensions.get("window");
@@ -94,6 +97,7 @@ export default function HomeScreen() {
   const c = colors[theme];
   const { steps, calories, goal, isTracking } = useSteps();
 
+  const [spo2, setSpo2] = useState<number>(0);
   const [sensorOpen, setSensorOpen] = useState(false);
   const isFocused = useRef(false);
 
@@ -105,8 +109,38 @@ export default function HomeScreen() {
     return () => { isFocused.current = false; };
   }, [refreshSymptoms]));
 
+  useEffect(() => {
+    let unsubscribe: (() => void) | undefined;
+
+    const subscribeToSpo2 = async () => {
+      try {
+        const uid = await getUserId();
+        if (!uid) return;
+
+        const ref = doc(db, "users", uid);
+
+        unsubscribe = onSnapshot(ref, (snapshot) => {
+          if (snapshot.exists()) {
+            const data = snapshot.data();
+            if (data.spo2 !== undefined) {
+              setSpo2(data.spo2);
+            }
+          }
+        });
+      } catch (error) {
+        console.error("❌ Error fetching SpO₂:", error);
+      }
+    };
+
+    subscribeToSpo2();
+
+    return () => {
+      if (unsubscribe) unsubscribe();
+    };
+  }, []);
+
   const heart = 78;
-  const spo2  = 97;
+  // SpO₂ is now fetched from Firebase in real time
 
   const getSeverityColor = (severity: string) => {
     switch (severity) {
@@ -150,7 +184,15 @@ export default function HomeScreen() {
             <ECGLine accent="#ef476f" />
           </TelemetryCard>
 
-          <TelemetryCard title="OXYGEN SAT." value={spo2} unit="%" icon="🩸" accent="#4cc9f0" theme={theme} />
+          <TelemetryCard
+            title="OXYGEN SAT."
+            value={spo2 || "--"}
+            unit="%"
+            icon="🩸"
+            onPress={() => router.push("/spo2")}
+            accent="#4cc9f0"
+            theme={theme}
+          />
 
           {/* Calories → calorie-intelligence (dedicated KCAL screen) */}
           <TelemetryCard
@@ -181,7 +223,17 @@ export default function HomeScreen() {
           <TouchableOpacity
             key={symptom.id}
             style={[styles.symptomCard, { backgroundColor: c.card }]}
-            onPress={() => router.push({ pathname: "/symptom-followup", params: { id: symptom.id.toString(), name: symptom.name } })}
+            onPress={() => {
+  if (!symptom?.id) return;
+
+  router.push({
+    pathname: "/symptom-followup",
+    params: {
+      id: String(symptom.id),
+      name: symptom.name ?? "Symptom",
+    },
+  });
+}}
             activeOpacity={0.7}
           >
             <View style={styles.symptomContent}>

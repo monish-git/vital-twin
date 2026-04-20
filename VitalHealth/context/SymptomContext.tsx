@@ -1,273 +1,447 @@
 // context/SymptomContext.tsx
 
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import React, { createContext, useCallback, useContext, useEffect, useState } from "react";
+import React, {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useState,
+} from "react";
 
 import {
   syncAddSymptom,
-  syncAddSymptomHistory,
   syncDeleteSymptom,
   syncResolveSymptom,
   syncUpdateSymptom,
+  fetchSymptomsFromFirebase,
+  fetchSymptomHistoryFromFirebase,
 } from "../services/firebaseSync";
 
-const ACTIVE_KEY  = "vitaltwin_active_symptoms";
+import {
+  // ✅ FIX 6: Removed scheduleSymptomCheck (deprecated) from imports.
+  //    updateSymptom was calling the old daily-scheduled version instead
+  //    of the hourly one, meaning rescheduled follow-ups fired at a fixed
+  //    time of day (8pm default) rather than 1 hour from now.
+  cancelSymptomNotification,
+  scheduleSymptomHourly,
+} from "../services/notifeeService";
+
+const ACTIVE_KEY = "vitaltwin_active_symptoms";
 const HISTORY_KEY = "vitaltwin_symptom_history";
 
+//////////////////////////////////////////////////////////
+// TYPES
+//////////////////////////////////////////////////////////
+
 export type Symptom = {
-  id:               number;
-  name:             string;
-  severity:         "mild" | "moderate" | "severe" | "emergency" | string;
-  startedAt:        number;
-  resolvedAt?:      number;
-  notes?:           string;
+  id: number;
+  categoryId: string;
+  optionId: string;
+  name: string;
+  severity: "mild" | "moderate" | "severe" | "emergency" | string;
+  startedAt: number;
+  resolvedAt?: number;
+  notes?: string;
   followUpMinutes?: number;
   followUpAnswers?: string;
 };
 
 export type HistorySymptom = Symptom & {
   resolvedAt: number;
-  duration:   number;
+  duration: number;
 };
+
+//////////////////////////////////////////////////////////
 
 type SymptomContextType = {
-  activeSymptoms:  Symptom[];
+  activeSymptoms: Symptom[];
   historySymptoms: HistorySymptom[];
   refreshSymptoms: () => Promise<void>;
-  logSymptom:      (name: string, severity: Symptom["severity"], followUpMinutes?: number, notes?: string, followUpAnswers?: string) => Promise<void>;
-  resolveSymptom:  (id: number) => Promise<void>;
-  removeSymptom:   (id: number) => Promise<void>;
-  updateSymptom:   (id: number, updates: Partial<Symptom>) => Promise<void>;
-  clearHistory:    () => Promise<void>;
+  logSymptom: (
+    categoryId: string,
+    optionId: string,
+    name: string,
+    severity: Symptom["severity"],
+    followUpMinutes?: number,
+    notes?: string,
+    followUpAnswers?: string
+  ) => Promise<void>;
+  resolveSymptom: (id: number) => Promise<void>;
+  removeSymptom: (id: number) => Promise<void>;
+  updateSymptom: (
+    id: number,
+    updates: Partial<Symptom>
+  ) => Promise<void>;
+  clearHistory: () => Promise<void>;
+  logCustomSymptom: (
+    description: string,
+    severity?: Symptom["severity"],
+    followUpMinutes?: number,
+    followUpAnswers?: string
+  ) => Promise<void>;
 };
 
+//////////////////////////////////////////////////////////
+
 const SymptomContext = createContext<SymptomContextType>({
-  activeSymptoms:  [],
+  activeSymptoms: [],
   historySymptoms: [],
   refreshSymptoms: async () => {},
-  logSymptom:      async () => {},
-  resolveSymptom:  async () => {},
-  removeSymptom:   async () => {},
-  updateSymptom:   async () => {},
-  clearHistory:    async () => {},
+  logSymptom: async () => {},
+  resolveSymptom: async () => {},
+  removeSymptom: async () => {},
+  updateSymptom: async () => {},
+  clearHistory: async () => {},
+  logCustomSymptom: async () => {},
 });
 
 export function useSymptoms() {
   return useContext(SymptomContext);
 }
 
-// ✅ Retry helper — tries Firebase sync up to 3 times with delay
-const syncWithRetry = async (fn: () => Promise<void>, label: string) => {
+//////////////////////////////////////////////////////////
+// RETRY HELPER
+//////////////////////////////////////////////////////////
+
+const syncWithRetry = async (
+  fn: () => Promise<void>,
+  label: string
+) => {
   for (let attempt = 1; attempt <= 3; attempt++) {
     try {
       await fn();
-      console.log(`✅ ${label} synced to Firebase (attempt ${attempt})`);
+      console.log(`✅ ${label} synced (attempt ${attempt})`);
       return;
-    } catch (e) {
-      console.log(`⚠️ ${label} sync attempt ${attempt} failed:`, e);
-      if (attempt < 3) await new Promise(r => setTimeout(r, attempt * 2000));
+    } catch (error) {
+      console.log(`⚠️ ${label} attempt ${attempt} failed`, error);
+      if (attempt < 3) {
+        await new Promise((r) => setTimeout(r, attempt * 2000));
+      }
     }
   }
-  console.log(`❌ ${label} sync failed after 3 attempts`);
 };
 
-export function SymptomsProvider({ children }: { children: React.ReactNode }) {
-  const [activeSymptoms,  setActiveSymptoms]  = useState<Symptom[]>([]);
+//////////////////////////////////////////////////////////
+// PROVIDER
+//////////////////////////////////////////////////////////
+
+export function SymptomsProvider({
+  children,
+}: {
+  children: React.ReactNode;
+}) {
+  const [activeSymptoms, setActiveSymptoms] = useState<Symptom[]>([]);
   const [historySymptoms, setHistorySymptoms] = useState<HistorySymptom[]>([]);
+  const [isLoaded, setIsLoaded] = useState(false);
 
-  // ── Load on mount + sync to Firebase ─────────────────────────
-  useEffect(() => {
-    (async () => {
-      try {
-        let activeRaw  = await AsyncStorage.getItem(ACTIVE_KEY);
-        let historyRaw = await AsyncStorage.getItem(HISTORY_KEY);
+  //////////////////////////////////////////////////////////
+  // NORMALIZE FIREBASE DATA
+  //////////////////////////////////////////////////////////
 
-        // ✅ Fall back to old keys
-        if (!activeRaw)  activeRaw  = await AsyncStorage.getItem("vitalhealth_active_symptoms");
-        if (!historyRaw) historyRaw = await AsyncStorage.getItem("vitalhealth_symptom_history");
-
-        const activeList: Symptom[]        = activeRaw  ? JSON.parse(activeRaw)  : [];
-        const historyList: HistorySymptom[] = historyRaw ? JSON.parse(historyRaw) : [];
-
-        if (activeList.length)  setActiveSymptoms(activeList);
-        if (historyList.length) setHistorySymptoms(historyList);
-
-        console.log("✅ SymptomContext loaded:",
-          activeList.length, "active,",
-          historyList.length, "history"
-        );
-
-        // ✅ Sync ALL local symptoms to Firebase when auth is ready
-        // This guarantees data appears in Firebase even if previous
-        // sync attempts failed due to auth not being ready
-        syncWithRetry(async () => {
-          const { auth } = await import("../services/firebase");
-
-          // Wait for auth
-          await new Promise<void>((resolve) => {
-            if (auth.currentUser) { resolve(); return; }
-            const unsub = auth.onAuthStateChanged((u) => {
-              unsub();
-              resolve();
-            });
-            setTimeout(resolve, 8000);
-          });
-
-          if (!auth.currentUser) {
-            console.log("⚠️ No auth user — skipping bulk symptom sync");
-            return;
-          }
-
-          console.log("🔄 Bulk syncing", activeList.length, "symptoms to Firebase...");
-
-          for (const symptom of activeList) {
-            await syncAddSymptom({
-              id:              symptom.id,
-              name:            symptom.name,
-              severity:        symptom.severity,
-              startedAt:       symptom.startedAt,
-              notes:           symptom.notes,
-              followUpMinutes: symptom.followUpMinutes,
-              followUpAnswers: symptom.followUpAnswers,
-            });
-          }
-
-          for (const symptom of historyList) {
-            await syncAddSymptomHistory({
-              id:              symptom.id,
-              name:            symptom.name,
-              severity:        symptom.severity,
-              startedAt:       symptom.startedAt,
-              resolvedAt:      symptom.resolvedAt,
-              duration:        symptom.duration,
-              notes:           symptom.notes,
-              followUpAnswers: symptom.followUpAnswers,
-            });
-          }
-
-          console.log("✅ Bulk symptom sync complete");
-        }, "BulkSymptomSync");
-
-      } catch (e) {
-        console.log("SymptomContext load error:", e);
-      }
-    })();
-  }, []);
-
-  const saveActive = async (list: Symptom[]) => {
-    setActiveSymptoms(list);
-    await AsyncStorage.setItem(ACTIVE_KEY, JSON.stringify(list));
+  const normalizeActiveSymptoms = (data: any[]): Symptom[] => {
+    return data
+      .map((s) => ({
+        id: Number(s?.id ?? Date.now()),
+        categoryId: s?.categoryId ?? "general",
+        optionId: s?.optionId ?? "unknown",
+        name: s?.name ?? "Unknown Symptom",
+        severity: s?.severity ?? "mild",
+        startedAt: Number(s?.startedAt ?? Date.now()),
+        notes: s?.notes,
+        followUpMinutes: s?.followUpMinutes,
+        followUpAnswers: s?.followUpAnswers,
+      }))
+      .filter((s) => !isNaN(s.id));
   };
 
-  const saveHistory = async (list: HistorySymptom[]) => {
-    setHistorySymptoms(list);
-    await AsyncStorage.setItem(HISTORY_KEY, JSON.stringify(list));
+  const normalizeHistorySymptoms = (data: any[]): HistorySymptom[] => {
+    return data
+      .map((s) => {
+        const startedAt = Number(s?.startedAt ?? Date.now());
+        const resolvedAt = Number(s?.resolvedAt ?? Date.now());
+        return {
+          id: Number(s?.id ?? Date.now()),
+          categoryId: s?.categoryId ?? "general",
+          optionId: s?.optionId ?? "unknown",
+          name: s?.name ?? "Unknown Symptom",
+          severity: s?.severity ?? "mild",
+          startedAt,
+          resolvedAt,
+          duration: Number(s?.duration ?? resolvedAt - startedAt),
+          notes: s?.notes,
+          followUpMinutes: s?.followUpMinutes,
+          followUpAnswers: s?.followUpAnswers,
+        };
+      })
+      .filter((s) => !isNaN(s.id));
   };
+
+  //////////////////////////////////////////////////////////
+  // REFRESH FROM FIREBASE + LOCAL STORAGE
+  //////////////////////////////////////////////////////////
 
   const refreshSymptoms = useCallback(async () => {
     try {
-      const activeRaw  = await AsyncStorage.getItem(ACTIVE_KEY);
+      console.log("🔄 Syncing symptoms from Firebase...");
+
+      const activeRaw = await AsyncStorage.getItem(ACTIVE_KEY);
       const historyRaw = await AsyncStorage.getItem(HISTORY_KEY);
-      if (activeRaw)  setActiveSymptoms(JSON.parse(activeRaw));
-      if (historyRaw) setHistorySymptoms(JSON.parse(historyRaw));
-    } catch (e) {
-      console.log("refreshSymptoms error:", e);
+
+      const localActive: Symptom[] = activeRaw ? JSON.parse(activeRaw) : [];
+      const localHistory: HistorySymptom[] = historyRaw ? JSON.parse(historyRaw) : [];
+
+      const firebaseActive = await fetchSymptomsFromFirebase();
+      const firebaseHistory = await fetchSymptomHistoryFromFirebase();
+
+      const normalizedActive = normalizeActiveSymptoms(firebaseActive || []);
+      const normalizedHistory = normalizeHistorySymptoms(firebaseHistory || []);
+
+      const mergedActive = [...localActive, ...normalizedActive].filter(
+        (item, index, self) =>
+          index === self.findIndex((t) => t.id === item.id)
+      );
+
+      const mergedHistory = [...localHistory, ...normalizedHistory].filter(
+        (item, index, self) =>
+          index === self.findIndex((t) => t.id === item.id)
+      );
+
+      setActiveSymptoms(mergedActive);
+      setHistorySymptoms(mergedHistory);
+
+      await AsyncStorage.setItem(ACTIVE_KEY, JSON.stringify(mergedActive));
+      await AsyncStorage.setItem(HISTORY_KEY, JSON.stringify(mergedHistory));
+
+      console.log("✅ Symptoms synced successfully");
+    } catch (error) {
+      console.log("❌ Refresh error:", error);
     }
   }, []);
 
-  // ── Log Symptom ───────────────────────────────────────────────
-  const logSymptom = useCallback(async (
-    name:             string,
-    severity:         Symptom["severity"],
-    followUpMinutes?: number,
-    notes?:           string,
-    followUpAnswers?: string
-  ) => {
-    const now = Date.now();
-    const newSymptom: Symptom = {
-      id:              now,
-      name:            name.trim(),
-      severity,
-      startedAt:       now,
-      notes,
-      followUpMinutes,
-      followUpAnswers,
+  //////////////////////////////////////////////////////////
+  // LOAD & SYNC ON APP START
+  //////////////////////////////////////////////////////////
+
+  useEffect(() => {
+    const initialize = async () => {
+      await refreshSymptoms();
+      setIsLoaded(true);
     };
+    initialize();
+  }, [refreshSymptoms]);
 
-    // 1️⃣ Save locally first — always works
-    await saveActive([...activeSymptoms, newSymptom]);
-    console.log("🩺 Symptom saved locally:", name, "id:", now);
+  //////////////////////////////////////////////////////////
+  // AUTO SAVE TO ASYNC STORAGE
+  //////////////////////////////////////////////////////////
 
-    // 2️⃣ Sync to Firebase with retry in background
-    syncWithRetry(
-      () => syncAddSymptom({
-        id:              newSymptom.id,
-        name:            newSymptom.name,
-        severity:        newSymptom.severity,
-        startedAt:       newSymptom.startedAt,
-        notes:           newSymptom.notes,
-        followUpMinutes: newSymptom.followUpMinutes,
-        followUpAnswers: newSymptom.followUpAnswers,
-      }),
-      `Symptom(${name})`
-    );
-  }, [activeSymptoms]);
+  useEffect(() => {
+    if (isLoaded) {
+      AsyncStorage.setItem(ACTIVE_KEY, JSON.stringify(activeSymptoms));
+    }
+  }, [activeSymptoms, isLoaded]);
 
-  // ── Resolve Symptom ───────────────────────────────────────────
-  const resolveSymptom = useCallback(async (id: number) => {
-    const symptom = activeSymptoms.find(s => s.id === id);
-    if (!symptom) return;
+  useEffect(() => {
+    if (isLoaded) {
+      AsyncStorage.setItem(HISTORY_KEY, JSON.stringify(historySymptoms));
+    }
+  }, [historySymptoms, isLoaded]);
 
-    const resolvedAt = Date.now();
-    const duration   = resolvedAt - symptom.startedAt;
-    const resolved: HistorySymptom = { ...symptom, resolvedAt, duration };
+  //////////////////////////////////////////////////////////
+  // LOG SYMPTOM
+  //////////////////////////////////////////////////////////
 
-    // 1️⃣ Save locally
-    await saveActive(activeSymptoms.filter(s => s.id !== id));
-    await saveHistory([resolved, ...historySymptoms]);
+  const logSymptom = useCallback(
+    async (
+      categoryId: string,
+      optionId: string,
+      name: string,
+      severity: Symptom["severity"],
+      followUpMinutes?: number,
+      notes?: string,
+      followUpAnswers?: string
+    ) => {
+      const now = Date.now();
 
-    // 2️⃣ Sync to Firebase with retry
-    syncWithRetry(
-      async () => {
-        await syncResolveSymptom(id, resolvedAt, duration);
-        await syncAddSymptomHistory({
-          id:              symptom.id,
-          name:            symptom.name,
-          severity:        symptom.severity,
-          startedAt:       symptom.startedAt,
+      const newSymptom: Symptom = {
+        id: now,
+        categoryId,
+        optionId,
+        name: name.trim(),
+        severity,
+        startedAt: now,
+        notes,
+        followUpMinutes,
+        followUpAnswers,
+      };
+
+      setActiveSymptoms((prev) => [...prev, newSymptom]);
+
+      // 🔔 Schedule hourly follow-up notification
+      try {
+        await scheduleSymptomHourly(name.trim());
+        console.log("🩺 Symptom hourly notification scheduled for:", name);
+      } catch (err) {
+        console.log("❌ Symptom notification scheduling failed:", err);
+      }
+
+      syncWithRetry(
+        () => syncAddSymptom({ ...newSymptom }),
+        "AddSymptom"
+      );
+    },
+    []
+  );
+
+  //////////////////////////////////////////////////////////
+  // LOG CUSTOM SYMPTOM
+  //////////////////////////////////////////////////////////
+
+  const logCustomSymptom = useCallback(
+    async (
+      description: string,
+      severity: Symptom["severity"] = "mild",
+      followUpMinutes?: number,
+      followUpAnswers?: string
+    ) => {
+      if (!description.trim()) return;
+
+      await logSymptom(
+        "custom",
+        "other",
+        description.trim(),
+        severity,
+        followUpMinutes,
+        description,
+        followUpAnswers
+      );
+    },
+    [logSymptom]
+  );
+
+  //////////////////////////////////////////////////////////
+  // RESOLVE SYMPTOM
+  //////////////////////////////////////////////////////////
+
+  const resolveSymptom = useCallback(
+    async (id: number) => {
+      try {
+        const symptom = activeSymptoms.find((s) => s.id === id);
+        if (!symptom) return;
+
+        const resolvedAt = Date.now();
+        const duration = resolvedAt - symptom.startedAt;
+
+        const resolved: HistorySymptom = {
+          ...symptom,
           resolvedAt,
           duration,
-          notes:           symptom.notes,
-          followUpAnswers: symptom.followUpAnswers,
-        });
-      },
-      `ResolveSymptom(${id})`
-    );
-  }, [activeSymptoms, historySymptoms]);
+        };
 
-  // ── Remove Symptom ────────────────────────────────────────────
+        const updatedActive = activeSymptoms.filter((s) => s.id !== id);
+        setActiveSymptoms([...updatedActive]);
+
+        setHistorySymptoms((prev) => [resolved, ...prev]);
+
+        await AsyncStorage.setItem(
+          ACTIVE_KEY,
+          JSON.stringify(updatedActive)
+        );
+
+        const existingHistory = await AsyncStorage.getItem(HISTORY_KEY);
+        const parsedHistory = existingHistory
+          ? JSON.parse(existingHistory)
+          : [];
+
+        await AsyncStorage.setItem(
+          HISTORY_KEY,
+          JSON.stringify([resolved, ...parsedHistory])
+        );
+
+        await cancelSymptomNotification();
+
+        syncWithRetry(
+          () => syncResolveSymptom(id, resolvedAt, duration),
+          "ResolveSymptom"
+        );
+
+        console.log("✅ Symptom moved to history:", id);
+      } catch (err) {
+        console.log("❌ Resolve error:", err);
+      }
+    },
+    [activeSymptoms]
+  );
+
+  //////////////////////////////////////////////////////////
+  // REMOVE SYMPTOM
+  //////////////////////////////////////////////////////////
+
   const removeSymptom = useCallback(async (id: number) => {
-    await saveActive(activeSymptoms.filter(s => s.id !== id));
-    syncWithRetry(() => syncDeleteSymptom(id), `DeleteSymptom(${id})`);
-  }, [activeSymptoms]);
+    setActiveSymptoms((prev) => prev.filter((s) => s.id !== id));
 
-  // ── Update Symptom ────────────────────────────────────────────
-  const updateSymptom = useCallback(async (id: number, updates: Partial<Symptom>) => {
-    await saveActive(activeSymptoms.map(s => s.id === id ? { ...s, ...updates } : s));
-    syncWithRetry(() => syncUpdateSymptom(id, updates), `UpdateSymptom(${id})`);
-  }, [activeSymptoms]);
+    await cancelSymptomNotification();
 
-  const clearHistory = useCallback(async () => {
-    await saveHistory([]);
+    syncWithRetry(
+      () => syncDeleteSymptom(id),
+      "DeleteSymptom"
+    );
   }, []);
 
+  //////////////////////////////////////////////////////////
+  // UPDATE SYMPTOM
+  // ✅ FIX 6: Replaced deprecated scheduleSymptomCheck (which fired at a
+  //    fixed time of day) with scheduleSymptomHourly (fires 1 hour from now).
+  //    The old function was also still imported — now removed from imports.
+  //////////////////////////////////////////////////////////
+
+  const updateSymptom = useCallback(
+    async (id: number, updates: Partial<Symptom>) => {
+      setActiveSymptoms((prev) =>
+        prev.map((s) => (s.id === id ? { ...s, ...updates } : s))
+      );
+
+      if (updates.name) {
+        await cancelSymptomNotification();
+        await scheduleSymptomHourly(updates.name);
+        console.log("🩺 Rescheduled hourly notification for updated symptom:", updates.name);
+      }
+
+      syncWithRetry(
+        () => syncUpdateSymptom(id, updates),
+        "UpdateSymptom"
+      );
+    },
+    []
+  );
+
+  //////////////////////////////////////////////////////////
+  // CLEAR HISTORY
+  //////////////////////////////////////////////////////////
+
+  const clearHistory = useCallback(async () => {
+    setHistorySymptoms([]);
+    await AsyncStorage.removeItem(HISTORY_KEY);
+  }, []);
+
+  //////////////////////////////////////////////////////////
+  // PROVIDER
+  //////////////////////////////////////////////////////////
+
   return (
-    <SymptomContext.Provider value={{
-      activeSymptoms, historySymptoms,
-      refreshSymptoms, logSymptom,
-      resolveSymptom, removeSymptom,
-      updateSymptom, clearHistory,
-    }}>
+    <SymptomContext.Provider
+      value={{
+        activeSymptoms,
+        historySymptoms,
+        refreshSymptoms,
+        logSymptom,
+        resolveSymptom,
+        removeSymptom,
+        updateSymptom,
+        clearHistory,
+        logCustomSymptom,
+      }}
+    >
       {children}
     </SymptomContext.Provider>
   );

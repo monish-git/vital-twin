@@ -1,12 +1,9 @@
 // components/Header.tsx
-// Fixed: uses useSafeAreaInsets so header never overlaps status bar on any device
-// Fixed: showBack defaults to false (tab screens show profile icon; stack screens pass showBack={true})
 
 import { Ionicons } from "@expo/vector-icons";
-import { useRouter } from "expo-router";
+import { usePathname, useRouter } from "expo-router";
 import React from "react";
 import {
-  Platform,
   StyleSheet,
   Text,
   TouchableOpacity,
@@ -16,34 +13,45 @@ import { useSafeAreaInsets } from "react-native-safe-area-context";
 
 import { useTheme } from "../../context/ThemeContext";
 
-export interface HeaderProps {
+interface HeaderProps {
   title?: string;
   showBack?: boolean;
+  showProfile?: boolean;
+  showSOS?: boolean;
 }
 
-export default function Header({ title = "VitalTwin", showBack = false }: HeaderProps) {
+export default function Header({
+  title = "VitalTwin",
+  showBack = false,
+  showProfile = true,
+  showSOS = true,
+}: HeaderProps) {
   const router = useRouter();
-  const { theme } = useTheme();
+  const pathname = usePathname();
   const insets = useSafeAreaInsets();
-
-  // Compute header height based on device status bar
-  const statusBarHeight = Math.max(insets.top, Platform.OS === "android" ? 24 : 20);
-  const headerHeight = statusBarHeight + 52;
+  const { theme } = useTheme();
 
   const colors =
     theme === "light"
       ? {
-          bg: "rgba(255, 255, 255, 0.95)",
+          bg: "#ffffff",
           border: "#e2e8f0",
           text: "#020617",
           accent: "#0ea5e9",
         }
       : {
-          bg: "rgba(2, 6, 23, 0.95)",
+          bg: "#020617",
           border: "#1e293b",
           text: "#e2e8f0",
           accent: "#38bdf8",
         };
+
+  // Prevent duplicate navigation to Profile
+  const handleProfilePress = () => {
+    if (!pathname.includes("profile")) {
+      router.push("/profile");
+    }
+  };
 
   return (
     <View
@@ -52,48 +60,52 @@ export default function Header({ title = "VitalTwin", showBack = false }: Header
         {
           backgroundColor: colors.bg,
           borderBottomColor: colors.border,
-          height: headerHeight,
-          paddingTop: statusBarHeight,
+          paddingTop: insets.top,
+          height: 60 + insets.top,
         },
       ]}
     >
       <View style={styles.contentRow}>
-        <View style={styles.left}>
-          {showBack ? (
-            <TouchableOpacity
-              onPress={() => router.back()}
-              activeOpacity={0.7}
-              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-            >
-              <Ionicons
-                name="chevron-back"
-                size={28}
-                color={colors.accent}
-              />
-            </TouchableOpacity>
-          ) : (
-            <TouchableOpacity
-              onPress={() => router.push("/profile")}
-              activeOpacity={0.7}
-              hitSlop={{ top: 10, bottom: 10, left: 10, right: 10 }}
-            >
-              <Ionicons
-                name="person-circle-outline"
-                size={34}
-                color={colors.accent}
-              />
-            </TouchableOpacity>
-          )}
-        </View>
+        {/* LEFT: Back Button or Profile Icon */}
+        {showBack ? (
+          <TouchableOpacity
+            onPress={() => router.back()}
+            activeOpacity={0.7}
+          >
+            <Ionicons
+              name="chevron-back"
+              size={28}
+              color={colors.accent}
+            />
+          </TouchableOpacity>
+        ) : showProfile ? (
+          <TouchableOpacity
+            onPress={handleProfilePress}
+            activeOpacity={0.7}
+          >
+            <Ionicons
+              name="person-circle-outline"
+              size={34}
+              color={colors.accent}
+            />
+          </TouchableOpacity>
+        ) : (
+          <View style={styles.placeholder} />
+        )}
 
+        {/* TITLE */}
         <Text
-          style={[styles.title, { color: colors.text }]}
+          style={[
+            styles.title,
+            { color: colors.text },
+          ]}
           numberOfLines={1}
         >
           {title}
         </Text>
 
-        <View style={styles.right}>
+        {/* RIGHT: SOS Button */}
+        {showSOS ? (
           <TouchableOpacity
             style={styles.sosButton}
             activeOpacity={0.85}
@@ -101,12 +113,13 @@ export default function Header({ title = "VitalTwin", showBack = false }: Header
           >
             <Text style={styles.sosText}>SOS</Text>
           </TouchableOpacity>
-        </View>
+        ) : (
+          <View style={styles.placeholder} />
+        )}
       </View>
     </View>
   );
 }
-
 
 const styles = StyleSheet.create({
   container: {
@@ -126,28 +139,17 @@ const styles = StyleSheet.create({
     paddingHorizontal: 16,
   },
 
-  left: {
-    width: 44,
-    alignItems: "flex-start",
-  },
-
-  right: {
-    width: 60,
-    alignItems: "flex-end",
-  },
-
   title: {
     fontSize: 18,
     fontWeight: "bold",
     letterSpacing: 1,
-    flex: 1,
     textAlign: "center",
   },
 
   sosButton: {
     backgroundColor: "#ef4444",
-    paddingHorizontal: 12,
-    paddingVertical: 6,
+    paddingHorizontal: 16,
+    paddingVertical: 7,
     borderRadius: 22,
     shadowColor: "#ef4444",
     shadowOpacity: 0.6,
@@ -159,6 +161,9 @@ const styles = StyleSheet.create({
     color: "white",
     fontWeight: "bold",
     letterSpacing: 1,
-    fontSize: 12,
+  },
+
+  placeholder: {
+    width: 34,
   },
 });

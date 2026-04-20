@@ -7,20 +7,20 @@ import {
   addMedicine as dbAddMedicine,
   deleteMedicine,
   getMedicines,
-  initMedicineDB,
   markMedicineTakenByNotificationId,
   updateMedicineNotificationId,
 } from "../database/medicineDB";
 
-import {
-  cancelMedicineNotification,
-  requestPermission, // ✅ FIXED
-} from "../services/notificationService";
+// ✅ FIX 1: Removed initMedicineDB import — _layout.tsx already calls it
+//    before this provider mounts. Calling it again here caused a race
+//    condition where the DB could be in a partially initialised state
+//    when addMedicine ran, resulting in notificationId never being saved.
 
 import {
-  scheduleDailyMedicineReminder,
-  scheduleOneTimeMedicineReminder,
-} from "../app/brain/medicineReminder";
+  cancelMedicineNotification,
+  scheduleMedicineDaily,
+  scheduleMedicineOnce,
+} from "../services/notifeeService";
 
 import { syncMedicineFile } from "../services/medicineFileSync";
 
@@ -75,15 +75,23 @@ const MedicineContext = createContext<ContextType | null>(null);
 
 ///////////////////////////////////////////////////////////
 
-export const MedicineProvider = ({ children }: { children: React.ReactNode }) => {
+export const MedicineProvider = ({
+  children,
+}: {
+  children: React.ReactNode;
+}) => {
   const [medicines, setMedicines] = useState<Medicine[]>([]);
 
   ///////////////////////////////////////////////////////////
+
   useEffect(() => {
+    // ✅ FIX 1: No longer calls initMedicineDB() — _layout.tsx owns that.
+    //    We only load medicines here, which is safe to call after DB is ready.
     initialize();
   }, []);
 
   ///////////////////////////////////////////////////////////
+
   useEffect(() => {
     const sub = AppState.addEventListener("change", (state) => {
       if (state === "active") {
@@ -98,11 +106,6 @@ export const MedicineProvider = ({ children }: { children: React.ReactNode }) =>
 
   const initialize = async () => {
     try {
-      await initMedicineDB();
-
-      // ✅ FIXED PERMISSION
-      await requestPermission();
-
       await loadMedicines();
       await syncMedicineFile();
 
@@ -138,12 +141,20 @@ export const MedicineProvider = ({ children }: { children: React.ReactNode }) =>
     reminder: number
   ) => {
     try {
+      // ✅ FIX 2: Validate and normalise timestamp.
+      //    If the caller accidentally passes seconds instead of milliseconds
+      //    (e.g. from a date picker that returns Unix seconds), new Date()
+      //    produces a date in 1970 and the notification fires immediately
+      //    or is skipped as "past time". We detect this and convert.
+      const normalisedTimestamp =
+        timestamp < 1_000_000_000_000 ? timestamp * 1000 : timestamp;
+
       dbAddMedicine(
         name,
         dose,
         type,
         time,
-        timestamp,
+        normalisedTimestamp,
         meal,
         frequency,
         startDate,
@@ -158,33 +169,59 @@ export const MedicineProvider = ({ children }: { children: React.ReactNode }) =>
 
       let notifId: string | null = null;
 
+      /////////////////////////////////////////////////////
+      // 🔔 SCHEDULE NOTIFICATION
+      /////////////////////////////////////////////////////
+
       if (reminder) {
         try {
-          const dateObj = new Date(timestamp);
+          const dateObj = new Date(normalisedTimestamp);
+          const now = new Date();
           const freq = frequency.toLowerCase();
 
-          console.log("⏰ Scheduling medicine:", name, dateObj);
+          console.log("⏰ Scheduling medicine:", name, "at", dateObj.toISOString());
 
           if (freq === "once") {
-            notifId = await scheduleOneTimeMedicineReminder(
-              `${name} — ${dose}`,
-              dateObj
-            );
-          } else if (freq === "daily") {
-            notifId = await scheduleDailyMedicineReminder(
-              `${name} — ${dose}`,
-              dateObj.getHours(),
-              dateObj.getMinutes()
-            );
+            if (dateObj.getTime() > now.getTime()) {
+              notifId = await scheduleMedicineOnce(
+                `${name} — ${dose}`,
+                dateObj,
+                lastMedicine.id
+              );
+              console.log("✅ One-time notification scheduled:", notifId);
+            } else {
+              console.log("⚠️ Skipped — medicine time is in the past:", dateObj);
+            }
           }
 
+          if (freq === "daily") {
+            notifId = await scheduleMedicineDaily(
+              `${name} — ${dose}`,
+              dateObj.getHours(),
+              dateObj.getMinutes(),
+              lastMedicine.id
+            );
+            console.log("✅ Daily notification scheduled:", notifId);
+          }
+
+          // ✅ FIX 3: Save notifId to DB immediately after scheduling,
+          //    BEFORE calling loadMedicines(). Previously loadMedicines()
+          //    was called first which reloaded stale data (notificationId = null)
+          //    into state, meaning the action handler could never match
+          //    incoming notification IDs to medicines in the DB.
           if (notifId) {
             updateMedicineNotificationId(lastMedicine.id, notifId);
+            console.log("💾 NotificationId saved to DB:", notifId);
           }
+
         } catch (notifError) {
           console.log("❌ Notification scheduling failed:", notifError);
         }
       }
+
+      /////////////////////////////////////////////////////
+      // Sync to Firebase
+      /////////////////////////////////////////////////////
 
       syncAddMedicine({
         id: lastMedicine.id,
@@ -192,7 +229,7 @@ export const MedicineProvider = ({ children }: { children: React.ReactNode }) =>
         dose,
         type,
         time,
-        timestamp,
+        timestamp: normalisedTimestamp,
         meal,
         frequency,
         startDate,
@@ -205,6 +242,8 @@ export const MedicineProvider = ({ children }: { children: React.ReactNode }) =>
         syncUpdateMedicineNotificationId(lastMedicine.id, notifId);
       }
 
+      // ✅ FIX 3 continued: loadMedicines() now runs AFTER the notifId
+      //    has been written to the DB, so state is always fresh and correct.
       await loadMedicines();
       await syncMedicineFile();
 

@@ -3,7 +3,7 @@
 
 import { Ionicons } from "@expo/vector-icons";
 import AsyncStorage from "@react-native-async-storage/async-storage";
-import { useRouter } from "expo-router";
+import { useLocalSearchParams, useRouter } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import React, { useEffect, useRef, useState } from "react";
 import {
@@ -437,6 +437,10 @@ function ProcessingModal({
 
 export default function AIHealthScreen() {
   const router = useRouter();
+  const { symptom, source } = useLocalSearchParams<{
+    symptom?: string;
+    source?: string;
+  }>();
   const { theme } = useTheme();
   const c = colors[theme];
 
@@ -467,10 +471,30 @@ export default function AIHealthScreen() {
   const [input, setInput] = useState("");
   const [isRecording, setIsRecording] = useState(false);
   const [loading, setLoading] = useState(false);
+  const [autoSent, setAutoSent] = useState(false);
 
   const listRef = useRef<FlatList>(null);
   const inputRef = useRef<TextInput>(null);
   const historyRef = useRef<string[]>([]);
+
+  // Auto-send symptom from Symptom Log to AI Health
+  useEffect(() => {
+  if (!symptom || autoSent || !serverIp) return;
+
+  const userSymptom = Array.isArray(symptom)
+    ? symptom[0]
+    : symptom;
+
+  if (!userSymptom.trim()) return;
+
+  const timer = setTimeout(async () => {
+    await sendMessageWithText(userSymptom);
+    setInput(""); // ✅ Ensure input is cleared
+    setAutoSent(true);
+  }, 800);
+
+  return () => clearTimeout(timer);
+}, [symptom, serverIp]);
 
   // Load saved config and docs on mount
   useEffect(() => {
@@ -487,9 +511,12 @@ export default function AIHealthScreen() {
         setAllChunks(ch);
 
         // Debug logging
-        console.log('[AIHealth] Loaded config:', { ip, port });
-        console.log('[AIHealth] Loaded documents:', d.length);
-        console.log('[AIHealth] Loaded chunks:', ch.length);
+// log('[AIHealth] Loaded config:', { ip, port });
+
+// log('[AIHealth] Loaded documents:', d.length);
+
+// log('[AIHealth] Loaded chunks:', ch.length);
+
         
         if (d.length > 0) {
           console.log('[AIHealth] Document details:');
@@ -515,7 +542,8 @@ export default function AIHealthScreen() {
         setModelLoading(true);
         generateEmbedding("warmup").finally(() => {
           setModelLoading(false);
-          console.log('[AIHealth] Embedding model ready');
+// log('[AIHealth] Embedding model ready');
+
         });
       } catch (e) {
         console.error("Error loading config:", e);
@@ -560,6 +588,103 @@ export default function AIHealthScreen() {
       setConnected(r.ok);
     } catch {
       setConnected(false);
+    }
+  };
+
+  // Helper function to send message with text
+  const sendMessageWithText = async (text: string) => {
+  if (!text.trim() || loading) return;
+  if (!serverIp) {
+    setShowConfig(true);
+    return;
+  }
+
+  const query = text.trim();
+
+  // ✅ Clear the text input after sending
+  setInput("");
+
+  const userMsg: Message = {
+    id: genId(),
+    text: query,
+    sender: "user",
+    timestamp: new Date(),
+  };
+
+  setMessages((prev) => [...prev, userMsg]);
+  setLoading(true);
+
+    const baseUrl = buildUrl(serverIp, serverPort);
+    const history = [...historyRef.current];
+
+    try {
+      let aiReply: string;
+
+      if (allChunks.length > 0) {
+        const queryEmbedding = await generateEmbedding(query);
+        const topResults = retrieveTopKChunks(queryEmbedding, allChunks, TOP_K);
+        const topChunks = topResults.map((r) => r.chunk.text);
+
+        const genRes = await fetch(`${baseUrl}/generate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            query,
+            chunks: topChunks,
+            history,
+          }),
+        });
+
+        if (!genRes.ok) {
+          const errorData = await genRes.json().catch(() => ({}));
+          throw new Error(errorData.detail || `Generate failed: ${genRes.status}`);
+        }
+
+        const genData = await genRes.json();
+        aiReply = genData.response;
+      } else {
+        const genRes = await fetch(`${baseUrl}/generate`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            query,
+            chunks: [],
+            history,
+          }),
+        });
+
+        if (!genRes.ok) {
+          const errorData = await genRes.json().catch(() => ({}));
+          throw new Error(errorData.detail || `Generate failed: ${genRes.status}`);
+        }
+
+        const genData = await genRes.json();
+        aiReply = genData.response;
+      }
+
+      const aiMsg: Message = {
+        id: genId(),
+        text: aiReply || "No response from server.",
+        sender: "ai",
+        timestamp: new Date(),
+      };
+
+      setMessages((prev) => [...prev, aiMsg]);
+      historyRef.current = [...history, query, aiReply].slice(-10);
+      setConnected(true);
+    } catch (e: any) {
+      setConnected(false);
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: genId(),
+          text: `❌ ${e.message}`,
+          sender: "system",
+          timestamp: new Date(),
+        },
+      ]);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -647,13 +772,15 @@ export default function AIHealthScreen() {
 
       if (allChunks.length > 0) {
         // ON-DEVICE: Generate query embedding and retrieve top-K chunks
-        console.log('[AIHealth] Generating embedding on-device...');
+// log('[AIHealth] Generating embedding on-device...');
+
         
         const queryEmbedding = await generateEmbedding(query);
         const topResults = retrieveTopKChunks(queryEmbedding, allChunks, TOP_K);
         const topChunks = topResults.map(r => r.chunk.text);
 
-        console.log(`[AIHealth] Retrieved top ${topChunks.length} chunks on-device`);
+// log(`[AIHealth] Retrieved top ${topChunks.length} chunks on-device`);
+
 
         // Send only the TOP K CHUNKS to server for LLM generation (healthbot_v3 API)
         const genRes = await fetch(`${baseUrl}/generate`, {
@@ -821,9 +948,20 @@ export default function AIHealthScreen() {
       <Header />
 
       {/* Header - Fixed padding */}
-      <View style={[styles.header, { backgroundColor: c.bg, borderBottomColor: c.border, paddingTop: 90 }]}>
-        <View style={styles.headerLeft}>
-          <Text style={[styles.headerTitle, { color: c.text }]}>🩺 Health AI</Text>
+      <View
+  style={[
+    styles.header,
+    {
+      backgroundColor: c.bg,
+      borderBottomColor: c.border,
+      paddingTop: 110,
+    },
+  ]}
+>
+  <View style={styles.headerLeft}>
+    <Text style={[styles.headerTitle, { color: c.text }]}>
+      🩺 Health AI
+    </Text>
           <View style={styles.statusContainer}>
             <View
               style={[
@@ -855,24 +993,35 @@ export default function AIHealthScreen() {
       </View>
 
       {/* RAG Status Bar - ON-DEVICE */}
-      <View style={[styles.ragBar, { backgroundColor: c.card, borderBottomColor: c.border }]}>
-        <TouchableOpacity 
-          style={{ flexDirection: 'row', alignItems: 'center' }}
-          onPress={() => setShowAllChunks(true)}
-        >
-          <Text style={[styles.ragBarTxt, { color: c.accent }]}>
-            {allChunks.length > 0
-              ? `🔍 On-device RAG · ${allChunks.length} chunks`
-              : "⚠️ No documents - upload to enable RAG"}
-          </Text>
-          {modelLoading && (
-            <ActivityIndicator size="small" color={c.accent} style={{ marginLeft: 8 }} />
-          )}
-        </TouchableOpacity>
-        <TouchableOpacity onPress={() => handleUpload("pdf")}>
-          <Text style={[styles.ragBarTxt, { color: c.sub }]}>+ Upload</Text>
-        </TouchableOpacity>
-      </View>
+      {/* RAG Status Bar - Visible Only When Documents Exist */}
+{allChunks.length > 0 && (
+  <View
+    style={[
+      styles.ragBar,
+      { backgroundColor: c.card, borderBottomColor: c.border },
+    ]}
+  >
+    <TouchableOpacity
+      style={{ flexDirection: "row", alignItems: "center" }}
+      onPress={() => setShowAllChunks(true)}
+    >
+      <Text style={[styles.ragBarTxt, { color: c.accent }]}>
+        🔍 On-device RAG · {allChunks.length} chunks
+      </Text>
+      {modelLoading && (
+        <ActivityIndicator
+          size="small"
+          color={c.accent}
+          style={{ marginLeft: 8 }}
+        />
+      )}
+    </TouchableOpacity>
+
+    <TouchableOpacity onPress={() => handleUpload("pdf")}>
+      <Text style={[styles.ragBarTxt, { color: c.sub }]}>+ Upload</Text>
+    </TouchableOpacity>
+  </View>
+)}
 
       {/* Main Content - Fixed Keyboard Avoiding View */}
       <KeyboardAvoidingView

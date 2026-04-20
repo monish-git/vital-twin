@@ -1,29 +1,54 @@
+import { collection, doc, getDoc, getDocs } from "firebase/firestore";
 import { db } from "./firebase";
-import { doc, getDoc, collection, getDocs } from "firebase/firestore";
 
 export async function getUserHealthData(userId: string) {
   try {
-    // Profile
+    if (!userId) {
+      console.log("❌ No userId provided");
+      return null;
+    }
+
+    console.log("🔍 Fetching health data for:", userId);
+
+    // ✅ FIXED: use "users" collection
     const profileDoc = await getDoc(doc(db, "users", userId));
 
-    // Medicines
-    const medSnap = await getDocs(collection(db, "users", userId, "medicines"));
+    if (!profileDoc.exists()) {
+      console.log("❌ Profile not found for:", userId);
+      return null;
+    }
 
-    // Symptoms
-    const symSnap = await getDocs(collection(db, "users", userId, "symptoms"));
+    const profileData = profileDoc.data();
+    console.log("✅ Profile loaded:", profileData?.firstName);
 
-    // Hydration
-    const hydDoc = await getDoc(doc(db, "hydration", userId));
+    // ✅ Medicines
+    const medSnap = await getDocs(
+      collection(db, "users", userId, "medicines")
+    );
+    const medicines = medSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    console.log("✅ Medicines:", medicines.length);
 
-    return {
-      profile: profileDoc.data(),
-      medicines: medSnap.docs.map(d => d.data()),
-      symptoms: symSnap.docs.map(d => d.data()),
-      hydration: hydDoc.data()?.amount || 0,
-    };
+    // ✅ Symptoms
+    const symSnap = await getDocs(
+      collection(db, "users", userId, "symptoms")
+    );
+    const symptoms = symSnap.docs.map((d) => ({ id: d.id, ...d.data() }));
+    console.log("✅ Symptoms:", symptoms.length);
 
+    // ✅ Hydration (optional subcollection)
+    let hydration = 0;
+    try {
+      const hydDoc = await getDoc(
+        doc(db, "users", userId, "health", "hydration")
+      );
+      if (hydDoc.exists()) {
+        hydration = hydDoc.data()?.amount || 0;
+      }
+    } catch (_) {}
+
+    return { profile: profileData, medicines, symptoms, hydration };
   } catch (error) {
-    console.log("Firebase fetch error:", error);
+    console.log("❌ getUserHealthData error:", error);
     return null;
   }
 }
