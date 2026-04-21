@@ -254,7 +254,7 @@ export default function Welcome() {
           alignItems: "center",
         }}
       >
-        <Text style={[styles.title, { color: colors.text }]}>VitalTwin</Text>
+        <Text style={[styles.title, { color: colors.text }]}>VitalHealth</Text>
         <View style={[styles.titleUnderline, { backgroundColor: colors.titleUnderline }]} />
       </Animated.View>
 

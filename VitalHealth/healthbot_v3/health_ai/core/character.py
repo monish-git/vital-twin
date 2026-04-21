@@ -1,183 +1,426 @@
 """
 character.py — Dr. Aria's personality, system prompts, and query classifier.
 
-Dr. Aria is the AI health assistant powering Health AI v3.
-She is warm, precise, and formats every response for readability.
-She never diagnoses, never invents values, and always defers to real doctors.
+v3.1 improvements:
+  - Default greeting message so Dr. Aria introduces herself on first load
+  - Smarter classify_intent: symptom/prescription/lab checks run AFTER
+    is_health_related, so a query is never silently dropped as off_topic
+    when it clearly belongs to a health category
+  - All system prompts expanded with richer instructions and tone guidance
+  - All frozensets significantly widened (symptoms, lab markers, medicines,
+    anatomy, conditions, lifestyle, mental health, paediatric, geriatric, etc.)
+  - MAX_HISTORY_TURNS = 3 enforced at context-build level (already in
+    context_builder.py; character.py now also exports the constant)
 """
 
-# ── Dr. Aria's base personality ───────────────────────────────────────────────
+# ── Default greeting ──────────────────────────────────────────────────────────
 
-_ARIA_PERSONA = """
-You are Dr. Aria, a warm and knowledgeable personal health assistant. Your job is to \
-help people understand their own health records — lab reports, prescriptions, and \
-medical documents — clearly and compassionately.
+GREETING_MESSAGE = (
+    "👋 Hello! I'm **Dr. Aria**, your personal AI health assistant.\n\n"
+    "I'm here to help you understand your health better. Here's what I can do:\n\n"
+    "🔬 **Lab Reports** — Explain your blood tests, scan results, or any medical report\n"
+    "💊 **Prescriptions** — Break down medicines, dosages, and what they're for\n"
+    "🤒 **Symptoms** — Guide you on symptoms, home care, and when to see a doctor\n"
+    "❓ **General Health** — Answer questions about conditions, treatments, diet, and wellness\n\n"
+    "Just type your question or upload a document to get started!\n\n"
+    "⚕️ *I'm an AI assistant, not a licensed doctor. Always consult a qualified "
+    "healthcare professional for medical advice, diagnosis, or treatment.*"
+)
 
-PERSONALITY:
-- Warm, calm, and encouraging. Never alarmist.
-- Precise and honest. Never guess or make up values.
-- Always remind the user that you are an AI assistant, not a real doctor.
+# ── System prompts ────────────────────────────────────────────────────────────
 
-FORMATTING RULES — follow these strictly:
-- Use **bold** for important lab values, medicine names, and key findings.
-- Use bullet points (•) for lists of items.
-- Use ✅ for normal/good results, ⚠️ for borderline, 🔴 for significantly abnormal.
-- Use 💊 for medicines, 🧪 for lab tests, 📋 for general health info.
-- Use ## for section headers when the response has multiple sections.
-- Keep responses structured, scannable, and easy to read on a phone screen.
-- End every response with a brief disclaimer reminding the user to consult a doctor.
+GENERAL_SYSTEM_PROMPT = """You are Dr. Aria, a warm, knowledgeable AI health assistant.
+Your role is to provide clear, accurate, and empathetic health information.
+
+Guidelines:
+- Answer in 4-6 sentences, using **bold** for key medical terms.
+- Use simple language; avoid unnecessary jargon.
+- If relevant, mention lifestyle factors (diet, sleep, exercise, stress).
+- Do NOT diagnose. Do NOT prescribe. Always recommend consulting a real doctor.
+- Use relevant emojis sparingly to aid readability.
+- If the question is vague, address the most likely interpretation and invite follow-up.
 """.strip()
 
-# ── Intent-specific system prompts ───────────────────────────────────────────
+LAB_SYSTEM_PROMPT = """You are Dr. Aria, an AI health assistant specialising in interpreting lab reports.
 
-GENERAL_SYSTEM_PROMPT = f"""
-{_ARIA_PERSONA}
-
-TASK: Answer a general health question from your medical knowledge.
-- Do NOT reference any patient records.
-- Keep the answer to 4–8 sentences or a clean bulleted list.
-- Use emojis and formatting to make the response easy to read.
+Guidelines:
+- Use ONLY values present in [PATIENT DATA]. Never invent or assume numbers.
+- Format each result as: * **Test Name**: value — Normal / Borderline / Abnormal
+- Group results under headers by panel (e.g., Complete Blood Count, Lipid Panel).
+- After listing all results, write a Summary (3-4 sentences) highlighting the most important findings.
+- Briefly explain what each abnormal result means in plain English.
+- Do NOT diagnose. Recommend the patient discuss results with their doctor.
 """.strip()
 
-LAB_SYSTEM_PROMPT = f"""
-{_ARIA_PERSONA}
+PRESCRIPTION_SYSTEM_PROMPT = """You are Dr. Aria, an AI health assistant who explains prescriptions clearly.
 
-TASK: Analyse the patient's lab results from the [PATIENT DATA] section below.
-
-STRICT RULES:
-- ONLY report values that appear word-for-word in [PATIENT DATA]. Never invent or estimate.
-- Mark a result HIGH ⚠️ ONLY if [PATIENT DATA] flags it HIGH ↑.
-- Mark a result LOW ⚠️ ONLY if [PATIENT DATA] flags it LOW ↓.
-- Mark a result normal ✅ if no flag is present.
-- Use the reference interval from the data — do NOT apply your own knowledge of ranges.
-- Group results by panel (e.g. ## 🩸 Complete Blood Count, ## 🧬 Liver Function).
-- End with a ## 📝 Summary section of 2–3 sentences.
-
-FORMAT each test as:
-• **Test Name**: value unit [ref range] — ✅ / ⚠️ HIGH / ⚠️ LOW / 🔴 CRITICAL
+Guidelines:
+- List every medicine from [PATIENT DATA] in this format:
+  Medicine Name — Dose | Frequency | Duration | Purpose (if stated)
+- Include prescribing doctor, date, and diagnosis/condition if present in the data.
+- Briefly explain what each medicine is commonly used for (1 sentence).
+- Do NOT add advice, warnings, or substitutions beyond what is written in the prescription.
+- If information is missing (e.g., duration not stated), say "Not specified".
+- End with a reminder to follow the doctor's instructions and not self-adjust doses.
 """.strip()
 
-PRESCRIPTION_SYSTEM_PROMPT = f"""
-{_ARIA_PERSONA}
+SYMPTOM_SYSTEM_PROMPT = """You are Dr. Aria, a caring AI health assistant helping someone understand their symptoms.
 
-TASK: Read the patient's prescription from [PATIENT DATA] and list every medicine clearly.
-
-RULES:
-- List EVERY medicine mentioned. Do not skip any.
-- Include doctor name, clinic, date, and diagnosis if present.
-- Do NOT add advice, warnings, or information beyond what is written in the prescription.
-
-FORMAT each medicine as:
-💊 **Medicine Name** — dosage • frequency • duration
+Guidelines:
+- Acknowledge the symptom(s) with empathy before giving information.
+- Provide practical, safe home-care advice using clear bullet points.
+- Explain likely common causes in simple terms (not a diagnosis).
+- List at least 3 specific warning signs that require urgent medical attention.
+- Always end by recommending they see a doctor if symptoms persist or worsen.
+- Do NOT speculate on rare or serious diagnoses unless symptoms clearly suggest urgency.
 """.strip()
 
-SYMPTOM_SYSTEM_PROMPT = f"""
-{_ARIA_PERSONA}
+MENTAL_HEALTH_SYSTEM_PROMPT = """You are Dr. Aria, a compassionate AI health assistant who takes mental health seriously.
 
-TASK: Provide safe, general guidance for the reported symptoms.
-
-RULES:
-- Give lifestyle, dietary, and home-care advice relevant to the symptoms.
-- List 3–5 warning signs that require urgent medical attention.
-- ALWAYS recommend seeing a real doctor.
-- Do NOT diagnose.
-- Keep the response practical and actionable.
+Guidelines:
+- Respond with empathy and warmth. Never be dismissive.
+- Provide general psychoeducation about the condition or feeling described.
+- Suggest evidence-based coping strategies (breathing, journaling, routine, social support).
+- Clearly recommend professional help — therapist, counsellor, or GP.
+- If there is any risk of self-harm or crisis, immediately provide crisis resources.
+- Do NOT diagnose mental health conditions. Avoid clinical labels unless the user uses them first.
 """.strip()
 
-MIXED_SYSTEM_PROMPT = f"""
-{_ARIA_PERSONA}
-
-TASK: Answer the patient's question using the health records in [PATIENT DATA].
-
-RULES:
-- Only use information from [PATIENT DATA].
-- Be concise but complete.
-- Format clearly with sections, bullets, and status icons where appropriate.
+MIXED_SYSTEM_PROMPT = """You are Dr. Aria, an AI health assistant.
+Answer using the information in [PATIENT DATA] and your medical knowledge.
+Be concise, well-formatted, and always recommend professional medical consultation.
 """.strip()
 
-# ── Disclaimer (appended to every response) ──────────────────────────────────
+# ── Safety text ───────────────────────────────────────────────────────────────
 
 DISCLAIMER = (
     "\n\n---\n"
-    "⚕️ *Dr. Aria is an AI assistant and cannot replace professional medical advice. "
-    "Always consult a qualified doctor for diagnosis, treatment, or medication changes.*"
+    "⚕️ *Dr. Aria is an AI assistant, not a licensed doctor. "
+    "This information is for educational purposes only. "
+    "Always consult a qualified healthcare professional for medical advice, "
+    "diagnosis, or treatment.*"
 )
 
 URGENT_NOTICE = (
-    "\n\n🚨 **URGENT**: Some of the values or symptoms you mentioned may require "
-    "immediate medical attention. Please contact a doctor or emergency services now."
+    "\n\n🚨 **URGENT — Please seek immediate medical attention.** "
+    "Some of the symptoms or values you mentioned may indicate a medical emergency. "
+    "Call emergency services (911 / 999 / 112) or go to the nearest hospital now. "
+    "Do not wait."
 )
 
-# ── Query classifier ──────────────────────────────────────────────────────────
+# ── Context window ────────────────────────────────────────────────────────────
+
+MAX_HISTORY_TURNS = 3  # each turn = 1 user + 1 AI message
+
+# ── Keyword sets ──────────────────────────────────────────────────────────────
 
 _SYMPTOM_KW = frozenset([
-    "i feel", "i am feeling", "i've been", "i have been feeling",
-    "pain", "fever", "cough", "headache", "vomiting", "nausea",
-    "dizziness", "fatigue", "weakness", "chest pain", "shortness of breath",
-    "rash", "swelling", "bleeding", "burning", "itching",
+    # Self-report phrases
+    "i feel", "i am feeling", "i've been", "i have been feeling", "i'm feeling",
+    "i've had", "i have had", "i keep", "i keep getting", "i can't", "i cannot",
+    "my body", "my chest", "my head", "my stomach", "my back", "my leg",
+    "my arm", "my throat", "my eyes", "my skin", "my joints",
+    # Pain & discomfort
+    "pain", "ache", "aching", "hurts", "hurting", "sore", "soreness",
+    "cramp", "cramping", "throbbing", "stabbing", "burning", "stinging",
+    "tingling", "numbness", "numb", "tender", "sensitivity",
+    # Fever & temperature
+    "fever", "high temperature", "chills", "chilly", "shivering", "sweating",
+    "night sweats", "hot flashes", "cold sweats",
+    # Respiratory
+    "cough", "coughing", "wheezing", "breathless", "shortness of breath",
+    "difficulty breathing", "tight chest", "chest tightness", "runny nose",
+    "stuffy nose", "congestion", "sneezing", "sore throat", "hoarse",
+    # Gastrointestinal
+    "nausea", "vomiting", "vomit", "threw up", "diarrhea", "diarrhoea",
+    "constipation", "bloating", "bloated", "gas", "indigestion", "heartburn",
+    "acid reflux", "stomach ache", "abdominal pain", "loose stools",
+    # Neurological / head
+    "headache", "migraine", "dizziness", "dizzy", "lightheaded", "fainting",
+    "vertigo", "confusion", "forgetfulness", "memory loss", "blurred vision",
+    "double vision", "ringing in ears", "tinnitus", "ear pain",
+    # Energy & general
+    "fatigue", "tired", "tiredness", "exhausted", "exhaustion", "lethargy",
+    "weakness", "weak", "low energy", "not sleeping", "insomnia",
+    "oversleeping", "loss of appetite", "not eating",
+    # Skin
+    "rash", "rashes", "hives", "itching", "itch", "itchy", "redness",
+    "swelling", "swollen", "bruising", "bruise", "dry skin", "peeling",
+    "yellow skin", "jaundice", "pale skin",
+    # Bleeding
+    "bleeding", "blood in stool", "blood in urine", "blood in mucus",
+    "bleeding gums", "nosebleed",
+    # Urinary
+    "frequent urination", "burning urination", "dark urine", "cloudy urine",
+    "no urination", "urine smell",
+    # Musculoskeletal
+    "joint pain", "knee pain", "back pain", "neck pain", "shoulder pain",
+    "muscle pain", "muscle stiffness", "stiff neck", "stiff joints",
+    # Mental / emotional symptoms
+    "anxious", "anxiety", "panic", "panic attack", "depressed", "depression",
+    "mood swings", "irritable", "angry", "crying", "sad", "hopeless",
+    "stressed", "overwhelmed",
+    # Cardiac
+    "palpitations", "heart racing", "heart pounding", "irregular heartbeat",
+    "skipped beat", "chest pain",
+    # Weight
+    "weight loss", "weight gain", "losing weight", "gaining weight",
+    "sudden weight",
 ])
 
 _PRESCRIPTION_KW = frozenset([
-    "prescription", "prescriptions", "medicine", "medicines",
-    "medication", "medications", "tablet", "tablets", "capsule",
-    "drug", "drugs", "prescribed", "dosage", "dose", "syrup",
-    "what did the doctor", "what was prescribed",
+    "prescription", "prescriptions", "prescribed", "prescribe",
+    "medicine", "medicines", "medication", "medications",
+    "tablet", "tablets", "capsule", "capsules", "pill", "pills",
+    "drug", "drugs", "syrup", "drops", "patch", "inhaler",
+    "injection", "injections", "infusion", "ointment", "cream", "gel",
+    "suppository", "nebulizer",
+    "dosage", "dose", "doses", "how much to take", "when to take",
+    "how to take", "side effects", "interactions", "drug interaction",
+    "antibiotic", "antibiotics", "antifungal", "antiviral", "antidepressant",
+    "antihypertensive", "diuretic", "painkiller", "pain reliever",
+    "blood thinner", "anticoagulant", "statin", "beta blocker",
+    "ace inhibitor", "calcium channel", "insulin", "metformin",
+    "amlodipine", "lisinopril", "atorvastatin", "omeprazole",
+    "pantoprazole", "azithromycin", "amoxicillin", "paracetamol",
+    "ibuprofen", "aspirin", "cetirizine", "levocetirizine",
+    "montelukast", "salbutamol", "fluticasone", "prednisone",
+    "prednisolone", "levothyroxine", "methotrexate", "hydroxychloroquine",
+    "what did the doctor", "what was prescribed", "my prescription",
+    "my medicine", "my medication",
 ])
 
 _LAB_KW = frozenset([
-    "lab", "report", "result", "results", "test", "tests", "blood",
-    "hemoglobin", "glucose", "cholesterol", "platelet", "wbc", "rbc",
-    "thyroid", "creatinine", "uric acid", "bilirubin", "sgpt", "sgot",
-    "hba1c", "vitamin", "iron", "calcium", "sodium", "potassium",
-    "abnormal", "normal range", "reference range", "high", "low",
-    "my report", "my results", "my blood test", "my lab",
+    # General
+    "lab", "laboratory", "report", "result", "results", "test", "tests",
+    "blood test", "blood work", "my report", "my results", "my lab",
+    "my blood test", "my test", "test report",
+    # Imaging
+    "scan", "mri", "x-ray", "xray", "ultrasound", "ct scan", "pet scan",
+    "ecg", "ekg", "echocardiogram", "endoscopy", "colonoscopy", "biopsy",
+    # CBC / haematology
+    "hemoglobin", "haemoglobin", "hgb", "hb",
+    "platelet", "platelets", "plt",
+    "wbc", "white blood cell", "white blood count",
+    "rbc", "red blood cell", "red blood count",
+    "hematocrit", "haematocrit", "hct", "mcv", "mch", "mchc", "rdw",
+    "neutrophil", "lymphocyte", "monocyte", "eosinophil", "basophil",
+    # Metabolic / chemistry
+    "glucose", "fasting glucose", "blood sugar", "hba1c",
+    "cholesterol", "ldl", "hdl", "triglycerides", "vldl",
+    "creatinine", "urea", "bun", "uric acid", "gfr", "egfr",
+    "sodium", "potassium", "chloride", "bicarbonate", "calcium",
+    "magnesium", "phosphorus", "albumin", "total protein",
+    # Liver
+    "sgpt", "alt", "sgot", "ast", "ggt", "alp", "alkaline phosphatase",
+    "bilirubin", "direct bilirubin", "indirect bilirubin", "liver function",
+    "lft", "liver enzymes",
+    # Thyroid
+    "thyroid", "tsh", "t3", "t4", "free t3", "free t4", "thyroid function",
+    # Vitamins & minerals
+    "vitamin d", "vitamin b12", "vitamin c", "vitamin a", "vitamin e",
+    "folate", "folic acid", "iron", "ferritin", "tibc", "transferrin",
+    "zinc", "copper",
+    # Cardiac markers
+    "troponin", "ck-mb", "creatine kinase", "bnp",
+    # Inflammation / infection
+    "crp", "c-reactive protein", "esr", "erythrocyte sedimentation",
+    "procalcitonin", "widal", "dengue", "malaria", "typhoid",
+    # Hormones
+    "testosterone", "estrogen", "estradiol", "progesterone", "prolactin",
+    "cortisol", "c-peptide", "lh", "fsh", "amh",
+    # Urine
+    "urine test", "urinalysis", "urine culture", "urine routine",
+    "protein in urine", "microalbumin", "ketones in urine",
+    # Status words
+    "abnormal", "normal range", "reference range", "elevated",
+    "below normal", "within range", "out of range", "borderline",
+    "critical value",
 ])
 
 _URGENT_KW = frozenset([
-    "heart attack", "stroke", "seizure", "unconscious", "can't breathe",
-    "cannot breathe", "chest pain", "severe pain", "emergency",
-    "overdose", "poisoning", "unresponsive", "suicide", "self harm",
+    # Cardiac
+    "heart attack", "cardiac arrest", "chest pain", "chest tightness",
+    "chest pressure", "jaw pain",
+    # Neurological
+    "stroke", "seizure", "convulsion", "fitting",
+    "unconscious", "unresponsive", "passed out", "fainting", "fainted",
+    "sudden confusion", "can't speak", "cannot speak", "slurred speech",
+    "sudden vision loss", "face drooping",
+    # Respiratory
+    "can't breathe", "cannot breathe", "shortness of breath severe",
+    "choking", "stopped breathing", "turning blue",
+    # Bleeding / trauma
+    "severe bleeding", "heavy bleeding", "uncontrolled bleeding",
+    "coughing blood", "vomiting blood",
+    # Mental health emergencies
+    "suicide", "suicidal", "self harm", "self-harm", "overdose",
+    "poisoning", "want to die", "kill myself", "end my life",
+    "harming myself",
+    # Allergic
+    "anaphylaxis", "anaphylactic", "throat closing", "throat swelling",
+    # General emergency
+    "emergency", "ambulance", "call 911", "call 999", "call 112",
 ])
+
+# ── Health topic whitelist ────────────────────────────────────────────────────
+
+_HEALTH_KW = frozenset([
+    # Body & anatomy
+    "body", "blood", "heart", "lung", "lungs", "liver", "kidney", "kidneys",
+    "brain", "bone", "bones", "muscle", "muscles", "skin", "eye", "eyes",
+    "ear", "ears", "nose", "throat", "stomach", "bowel", "bowels",
+    "intestine", "intestines", "colon", "rectum", "bladder", "uterus",
+    "ovary", "ovaries", "prostate", "pancreas", "spleen", "gallbladder",
+    "appendix", "spine", "spinal cord", "nerve", "nerves", "artery",
+    "arteries", "vein", "veins", "thyroid", "adrenal", "pituitary",
+    "tonsils", "trachea", "esophagus", "diaphragm",
+    # Conditions & diseases
+    "disease", "disorder", "condition", "syndrome", "infection",
+    "cancer", "carcinoma", "tumor", "tumour", "malignant", "benign",
+    "diabetes", "diabetic", "type 1", "type 2", "pre-diabetes",
+    "hypertension", "high blood pressure", "low blood pressure", "hypotension",
+    "blood pressure", "cholesterol", "hyperlipidemia",
+    "thyroid", "hypothyroid", "hyperthyroid", "hashimoto",
+    "anemia", "anaemia", "iron deficiency",
+    "asthma", "copd", "bronchitis", "pneumonia", "tuberculosis", "tb",
+    "allergy", "allergies", "allergic", "hay fever", "rhinitis",
+    "arthritis", "rheumatoid", "osteoarthritis", "gout", "lupus",
+    "fibromyalgia", "osteoporosis",
+    "depression", "anxiety", "bipolar", "schizophrenia", "adhd", "autism",
+    "ocd", "ptsd", "eating disorder", "anorexia", "bulimia",
+    "fever", "flu", "influenza", "cold", "common cold",
+    "covid", "covid-19", "coronavirus",
+    "virus", "viral", "bacteria", "bacterial", "fungal", "parasite",
+    "uti", "urinary tract infection", "kidney infection", "cystitis",
+    "eczema", "psoriasis", "acne", "dermatitis",
+    "migraine", "epilepsy", "parkinson", "alzheimer", "dementia",
+    "multiple sclerosis",
+    "hepatitis", "cirrhosis", "fatty liver",
+    "ibs", "irritable bowel", "crohn", "ulcerative colitis", "celiac",
+    "acid reflux", "gerd", "peptic ulcer",
+    "pcos", "endometriosis", "menopause", "menstruation", "period",
+    "pregnancy", "pregnant", "miscarriage", "fertility",
+    "erectile dysfunction", "sexual health", "std", "sti",
+    "hiv", "aids",
+    "stroke", "heart disease", "coronary artery", "heart failure",
+    "arrhythmia", "atrial fibrillation",
+    # Symptoms
+    "pain", "ache", "fever", "cough", "nausea", "vomit", "dizziness",
+    "fatigue", "tired", "weak", "swelling", "bleeding", "rash", "itch",
+    "headache", "migraine", "breathe", "breathing", "chest", "dizzy",
+    "sore", "cramp", "tingling", "numbness", "tremor", "shaking",
+    "jaundice", "pale",
+    # Tests & reports
+    "lab", "test", "report", "result", "blood test", "scan", "mri",
+    "x-ray", "xray", "ultrasound", "ecg", "ekg", "biopsy", "ct scan",
+    "hemoglobin", "glucose", "creatinine", "bilirubin",
+    "platelet", "wbc", "rbc", "hba1c", "cholesterol", "uric acid",
+    "sgpt", "sgot", "alt", "ast", "tsh", "t3", "t4",
+    "vitamin", "iron", "ferritin", "calcium", "sodium", "potassium",
+    "troponin", "crp", "esr", "ldl", "hdl", "triglycerides",
+    # Medicines
+    "medicine", "medication", "tablet", "capsule", "drug", "prescription",
+    "prescribed", "dosage", "dose", "syrup", "antibiotic", "supplement",
+    "vaccine", "vaccination", "injection", "insulin", "steroid",
+    "painkiller", "antidepressant", "antihypertensive",
+    "inhaler", "ointment", "cream", "drops",
+    # Healthcare system
+    "doctor", "physician", "specialist", "surgeon", "nurse", "pharmacist",
+    "hospital", "clinic", "emergency room", "patient", "surgery",
+    "treatment", "therapy", "physiotherapy", "chemotherapy",
+    "diagnosis", "prognosis", "referral", "consultation",
+    "health", "medical", "healthcare", "wellness",
+    # Lifestyle & preventive
+    "diet", "nutrition", "calorie", "calories", "protein", "carbohydrate",
+    "exercise", "workout", "fitness", "physical activity",
+    "weight", "bmi", "obesity", "overweight", "underweight",
+    "sleep", "insomnia", "sleep apnea",
+    "smoking", "quit smoking", "alcohol", "drinking", "addiction",
+    "stress", "mental health", "mindfulness", "meditation",
+    "checkup", "screening", "preventive", "prevention",
+    "vaccine", "immunisation", "immunization",
+    # Paediatric / geriatric
+    "child health", "paediatric", "pediatric", "infant", "baby", "toddler",
+    "growth", "developmental",
+    "elderly", "geriatric", "old age", "aging", "senior health",
+    # Personal context
+    "my report", "my test", "my results", "my prescription", "my medication",
+    "my doctor", "my health", "my blood", "i feel", "i am feeling",
+    "i have been", "my symptoms", "my condition", "my diagnosis",
+    "my surgery", "my treatment", "my history",
+])
+
+OFF_TOPIC_RESPONSE = (
+    "\U0001fa7a I'm **Dr. Aria**, your personal health assistant. "
+    "I specialise in health-related topics — lab reports, prescriptions, "
+    "symptoms, and general medical information.\n\n"
+    "It looks like your question might be outside my area of expertise. "
+    "Please ask me something health-related and I'll do my best to help! 😊"
+)
+
+
+# ── Classifier ────────────────────────────────────────────────────────────────
+
+def is_health_related(query: str) -> bool:
+    """Return True if query contains at least one health keyword."""
+    q = query.lower()
+    return any(k in q for k in _HEALTH_KW)
 
 
 def classify_intent(query: str) -> str:
     """
-    Classify query into one of: 'general', 'lab', 'prescription', 'symptom'.
+    Classify query intent.
 
     Priority order:
-        1. symptom  (patient is describing how they feel)
-        2. prescription (asking about medicines)
-        3. lab  (asking about test results / numbers)
-        4. general (fallback — medical knowledge question)
+      1. urgent       — emergencies always escalate first
+      2. symptom      — personal symptom / feeling queries
+      3. lab          — lab reports & test results
+      4. prescription — medicines & prescriptions
+      5. general      — anything else health-related
+      6. off_topic    — genuinely unrelated to health
+
+    KEY FIX: is_health_related is the FALLBACK for general, not a gate.
+    A query that misses specific keyword sets but is health-related is
+    correctly routed to "general" instead of "off_topic".
     """
     q = query.lower()
+
+    if any(k in q for k in _URGENT_KW):
+        return "urgent"
+
     if any(k in q for k in _SYMPTOM_KW):
         return "symptom"
-    if any(k in q for k in _PRESCRIPTION_KW):
-        return "prescription"
+
     if any(k in q for k in _LAB_KW):
         return "lab"
-    return "general"
+
+    if any(k in q for k in _PRESCRIPTION_KW):
+        return "prescription"
+
+    if is_health_related(q):
+        return "general"
+
+    return "off_topic"
 
 
 def detect_urgent(query: str) -> bool:
-    """Return True if the query contains urgent/emergency keywords."""
     q = query.lower()
     return any(k in q for k in _URGENT_KW)
 
 
 def get_system_prompt(intent: str) -> str:
-    """Return the correct system prompt for the given intent."""
     return {
-        "lab":          LAB_SYSTEM_PROMPT,
-        "prescription": PRESCRIPTION_SYSTEM_PROMPT,
-        "symptom":      SYMPTOM_SYSTEM_PROMPT,
-        "general":      GENERAL_SYSTEM_PROMPT,
+        "lab":           LAB_SYSTEM_PROMPT,
+        "prescription":  PRESCRIPTION_SYSTEM_PROMPT,
+        "symptom":       SYMPTOM_SYSTEM_PROMPT,
+        "urgent":        SYMPTOM_SYSTEM_PROMPT,
+        "general":       GENERAL_SYSTEM_PROMPT,
+        "mental_health": MENTAL_HEALTH_SYSTEM_PROMPT,
     }.get(intent, MIXED_SYSTEM_PROMPT)
 
 
 def get_max_tokens(intent: str) -> int:
-    """Return the token budget for the given intent."""
     from health_ai.config.settings import (
         MAX_TOKENS_GENERAL, MAX_TOKENS_LAB,
         MAX_TOKENS_PRESCRIPTION, MAX_TOKENS_SYMPTOM,
@@ -186,5 +429,6 @@ def get_max_tokens(intent: str) -> int:
         "lab":          MAX_TOKENS_LAB,
         "prescription": MAX_TOKENS_PRESCRIPTION,
         "symptom":      MAX_TOKENS_SYMPTOM,
+        "urgent":       MAX_TOKENS_SYMPTOM,
         "general":      MAX_TOKENS_GENERAL,
     }.get(intent, MAX_TOKENS_GENERAL)

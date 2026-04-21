@@ -1,35 +1,28 @@
 """
 server.py — Health AI v3 FastAPI application.
 
-Architecture:
-    This server is stateless with respect to documents.
-    The phone/client is responsible for storing document chunks and embeddings.
-    The server only handles:
-        1. OCR + chunking + embedding of uploaded files → returns to client
-        2. Embedding of query strings → returns to client
-        3. LLM generation given query + chunks (streaming SSE)
-        4. Health check
+Stateless architecture:
+    - Phone stores all document chunks and embeddings
+    - Server handles: OCR, embedding, and LLM generation
+    - No profiles, no vector store on the server
 
 Endpoints:
-    POST /upload-and-embed      Upload a file → OCR → chunk → embed → return chunks
+    POST /upload-and-embed      OCR + chunk + embed a file → return to client
     POST /embed-query           Embed a query string → return vector
-    POST /generate              LLM generation (blocking) from query + chunks
-    GET  /generate/stream       LLM generation (SSE streaming) from query + chunks
-    GET  /health                Health + readiness check
-    GET  /server/info           Server metadata for UI display
+    POST /generate              LLM generation from query + chunks
+    GET  /health                Health check
+    GET  /server/info           Server metadata
 """
 
-import json
+import asyncio
 import os
 import socket
 import tempfile
-import asyncio
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import FastAPI, HTTPException, UploadFile, File, Request
+from fastapi import FastAPI, HTTPException, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, Field
 
 from health_ai.embeddings.embedder import EmbeddingModel
@@ -37,12 +30,11 @@ from health_ai.rag.chunker import TextChunker
 from health_ai.utils.document_reader import DocumentReader, SUPPORTED_EXTENSIONS
 from health_ai.model.llm_loader import LLMEngine
 from health_ai.core.character import (
-    classify_intent,
-    get_system_prompt,
-    get_max_tokens,
-    detect_urgent,
+    classify_intent, get_system_prompt, get_max_tokens,
+    detect_urgent, DISCLAIMER, URGENT_NOTICE, OFF_TOPIC_RESPONSE,
+    GREETING_MESSAGE, MAX_HISTORY_TURNS,
 )
-from health_ai.core.safety import apply_safety_layer, DISCLAIMER, URGENT_NOTICE
+from health_ai.core.safety import apply_safety_layer
 from health_ai.rag.context_builder import build_context
 from health_ai.core.logger import get_logger
 from health_ai.core.exceptions import (
@@ -52,16 +44,11 @@ from health_ai.core.exceptions import (
 
 log = get_logger(__name__)
 
-# ── FastAPI app ───────────────────────────────────────────────────────────────
+# ── App ───────────────────────────────────────────────────────────────────────
 
 app = FastAPI(
     title="Health AI v3",
-    description=(
-        "Offline personal medical AI — powered by Dr. Aria and Qwen2.5-14B-Instruct.\n\n"
-        "The server is stateless: documents are OCR'd and embedded here, "
-        "but stored on the client device. Retrieval happens on-device; "
-        "only the matched context is sent here for LLM generation."
-    ),
+    description="Offline personal medical AI — Dr. Aria powered by Qwen2.5-14B-Instruct.",
     version="3.0.0",
 )
 
@@ -73,12 +60,12 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# ── Singletons (loaded at startup) ───────────────────────────────────────────
+# ── Singletons ────────────────────────────────────────────────────────────────
 
 _embedder: Optional[EmbeddingModel] = None
-_llm: Optional[LLMEngine] = None
-_chunker: Optional[TextChunker] = None
-_reader: Optional[DocumentReader] = None
+_llm:      Optional[LLMEngine]      = None
+_chunker:  Optional[TextChunker]    = None
+_reader:   Optional[DocumentReader] = None
 
 
 def _get_local_ip() -> str:
@@ -96,7 +83,7 @@ def _get_local_ip() -> str:
 async def startup():
     global _embedder, _llm, _chunker, _reader
 
-    port = int(os.environ.get("PORT", 8000))
+    port   = int(os.environ.get("PORT", 8000))
     lan_ip = _get_local_ip()
 
     print("\n" + "═" * 58)
@@ -106,144 +93,123 @@ async def startup():
     print(f"  Network: http://{lan_ip}:{port}   ← use this in the app")
     print("═" * 58 + "\n")
 
-    # Load embedding model first (fast, ~2s)
     log.info("Loading embedding model …")
     _embedder = EmbeddingModel()
     _embedder._ensure_loaded()
 
-    # Load LLM (slow, 20–60s depending on hardware)
-    log.info("Loading LLM — this may take a minute …")
+    log.info("Loading LLM — this may take up to 60 seconds …")
     try:
         _llm = LLMEngine()
         _llm._ensure_loaded()
     except ModelNotFoundError as e:
         log.error(str(e))
-        log.error("Server will start but /generate endpoints will return 503 until the model is placed.")
+        log.error("Server started but /generate will return 503 until model is placed.")
 
     _chunker = TextChunker()
     _reader  = DocumentReader()
 
     print("\n" + "═" * 58)
-    print("  ✅  Dr. Aria is ready. Start chatting!")
+    print("  ✅  Dr. Aria is ready!")
     print("═" * 58 + "\n")
 
 
-# ── Pydantic request/response models ─────────────────────────────────────────
+# ── Request / Response models ─────────────────────────────────────────────────
 
 class EmbedQueryRequest(BaseModel):
-    query: str = Field(..., min_length=1, max_length=2000, description="Query text to embed.")
+    query: str = Field(..., min_length=1, max_length=2000)
 
 
 class EmbedQueryResponse(BaseModel):
-    query: str
+    query:     str
     embedding: List[float]
-    dim: int
+    dim:       int
 
 
 class GenerateRequest(BaseModel):
-    query: str = Field(..., min_length=1, max_length=2000)
-    chunks: List[str] = Field(
-        default=[],
-        description="Pre-retrieved chunk texts from the client's on-device RAG.",
-    )
-    history: List[str] = Field(
-        default=[],
-        description=(
-            "Flat list of alternating [user_msg, ai_msg, ...]. "
-            "Most recent last. Pass [] to start fresh."
-        ),
-    )
+    query:   str        = Field(..., min_length=1, max_length=2000)
+    chunks:  List[str]  = Field(default=[], description="Top-K chunk texts from on-device RAG.")
+    history: List[str]  = Field(default=[], description="Alternating [user, ai, user, ai …] history.")
 
 
-class ChunkResponse(BaseModel):
-    text: str
+class GenerateResponse(BaseModel):
+    response: str
+    intent:   str
+
+
+class ChunkOut(BaseModel):
+    text:      str
     embedding: List[float]
-    metadata: dict
+    metadata:  dict
 
 
 class UploadResponse(BaseModel):
-    status: str
-    filename: str
-    doc_type: str
+    status:      str
+    filename:    str
+    doc_type:    str
     chunk_count: int
-    chunks: List[ChunkResponse]
-
-
-class HealthResponse(BaseModel):
-    status: str
-    version: str
-    llm_loaded: bool
-    embedder_loaded: bool
-    model_name: str
+    chunks:      List[ChunkOut]
 
 
 # ── Endpoints ─────────────────────────────────────────────────────────────────
 
-@app.get("/health", response_model=HealthResponse, tags=["System"])
+@app.get("/greeting", tags=["System"])
+async def greeting():
+    """
+    Returns Dr. Aria's introduction message.
+    Call this on app startup to display the welcome message to the user.
+    """
+    return {"message": GREETING_MESSAGE, "character": "Dr. Aria"}
+
+
+@app.get("/health", tags=["System"])
 async def health():
-    """
-    Health and readiness check.
-    Returns 200 when the server is up. 'llm_loaded' tells you if generation is ready.
-    """
-    return HealthResponse(
-        status="ok",
-        version="3.0.0",
-        llm_loaded=(_llm is not None and _llm._loaded),
-        embedder_loaded=(_embedder is not None and _embedder._loaded),
-        model_name="Qwen2.5-14B-Instruct-Q5_K_M",
-    )
+    return {
+        "status":          "ok",
+        "version":         "3.0.0",
+        "llm_loaded":      (_llm is not None and _llm._loaded),
+        "embedder_loaded": (_embedder is not None and _embedder._loaded),
+        "model":           "Qwen2.5-14B-Instruct-Q5_K_M",
+    }
 
 
 @app.get("/server/info", tags=["System"])
 async def server_info():
-    """Server metadata — useful for UI status displays."""
     port = int(os.environ.get("PORT", 8000))
     return {
-        "server": "Health AI v3",
-        "version": "3.0.0",
-        "character": "Dr. Aria",
-        "lan_ip": _get_local_ip(),
-        "port": port,
-        "llm_ready": (_llm is not None and _llm._loaded),
-        "embedder_ready": (_embedder is not None and _embedder._loaded),
-        "model": "Qwen2.5-14B-Instruct-Q5_K_M",
+        "server":          "Health AI v3",
+        "character":       "Dr. Aria",
+        "lan_ip":          _get_local_ip(),
+        "port":            port,
+        "llm_ready":       (_llm is not None and _llm._loaded),
+        "embedder_ready":  (_embedder is not None and _embedder._loaded),
+        "model":           "Qwen2.5-14B-Instruct-Q5_K_M",
         "embedding_model": "all-MiniLM-L6-v2",
-        "streaming_supported": True,
     }
 
 
 @app.post("/upload-and-embed", response_model=UploadResponse, tags=["Documents"])
 async def upload_and_embed(file: UploadFile = File(...)):
     """
-    Upload a PDF or image → OCR → chunk → embed → return chunks with embeddings.
-
-    The client (phone) stores the returned chunks locally.
-    The server keeps nothing — fully stateless.
-
-    Supported formats: PDF, JPG, JPEG, PNG, BMP, TIFF, WEBP
+    Upload a PDF or image → OCR → chunk → embed → return chunks+embeddings to client.
+    Server keeps nothing. Client stores everything locally.
     """
     filename = file.filename or "upload"
-    ext = Path(filename).suffix.lower()
+    ext      = Path(filename).suffix.lower()
 
     if ext not in SUPPORTED_EXTENSIONS:
         raise HTTPException(
             status_code=415,
-            detail=(
-                f"Unsupported file type '{ext}'. "
-                f"Supported: {', '.join(sorted(SUPPORTED_EXTENSIONS))}"
-            ),
+            detail=f"Unsupported file type '{ext}'. Supported: {', '.join(sorted(SUPPORTED_EXTENSIONS))}",
         )
 
-    # Save upload to a temp file
-    suffix = ext if ext else ".tmp"
+    suffix = ext or ".tmp"
     with tempfile.NamedTemporaryFile(delete=False, suffix=suffix) as tmp:
-        content = await file.read()
-        tmp.write(content)
+        tmp.write(await file.read())
         tmp_path = tmp.name
 
     try:
-        # 1. Extract text
-        log.info(f"Extracting text from upload: {filename}")
+        log.info(f"Processing upload: {filename}")
+
         try:
             text = _reader.extract(tmp_path)
         except UnsupportedFileTypeError as e:
@@ -253,55 +219,30 @@ async def upload_and_embed(file: UploadFile = File(...)):
         except OCRError as e:
             raise HTTPException(status_code=422, detail=str(e))
 
-        # 2. Detect document type
         doc_type = _reader.detect_doc_type(filename)
+        chunks   = _chunker.chunk(text, {"filename": filename, "doc_type": doc_type})
 
-        # 3. Chunk
-        base_metadata = {
-            "filename": filename,
-            "doc_type": doc_type,
-            "source": "upload",
-        }
-        chunks = _chunker.chunk(text, base_metadata)
         if not chunks:
-            raise HTTPException(
-                status_code=422,
-                detail="Document produced no text chunks after extraction.",
-            )
+            raise HTTPException(status_code=422, detail="Document produced no text chunks.")
 
-        # 4. Embed all chunks in one batch (efficient)
-        log.info(f"Embedding {len(chunks)} chunks from {filename} …")
         try:
-            chunk_texts = [c.text for c in chunks]
-            embeddings = _embedder.embed(chunk_texts)   # shape (N, 384)
+            embeddings = _embedder.embed([c.text for c in chunks])
         except EmbeddingError as e:
             raise HTTPException(status_code=500, detail=f"Embedding failed: {e}")
 
-        # 5. Build response
-        chunk_responses = [
-            ChunkResponse(
-                text=chunk.text,
-                embedding=embeddings[i].tolist(),
-                metadata=chunk.metadata,
-            )
-            for i, chunk in enumerate(chunks)
-        ]
-
-        log.info(
-            f"✅ Upload complete: {filename} → {len(chunks)} chunks, "
-            f"doc_type={doc_type}"
-        )
+        log.info(f"✅ {filename} → {len(chunks)} chunks, doc_type={doc_type}")
 
         return UploadResponse(
             status="success",
             filename=filename,
             doc_type=doc_type,
             chunk_count=len(chunks),
-            chunks=chunk_responses,
+            chunks=[
+                ChunkOut(text=c.text, embedding=embeddings[i].tolist(), metadata=c.metadata)
+                for i, c in enumerate(chunks)
+            ],
         )
-
     finally:
-        # Always clean up the temp file
         try:
             os.unlink(tmp_path)
         except Exception:
@@ -310,157 +251,88 @@ async def upload_and_embed(file: UploadFile = File(...)):
 
 @app.post("/embed-query", response_model=EmbedQueryResponse, tags=["RAG"])
 async def embed_query(request: EmbedQueryRequest):
-    """
-    Embed a query string and return its 384-dimensional vector.
-
-    The client uses this vector to run cosine similarity against its
-    locally stored chunk embeddings and identify the top-K most relevant chunks.
-    """
+    """Embed a query string → return 384-dim vector for on-device cosine similarity."""
     try:
         vec = _embedder.embed_single(request.query)
     except EmbeddingError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-    return EmbedQueryResponse(
-        query=request.query,
-        embedding=vec,
-        dim=len(vec),
-    )
+    return EmbedQueryResponse(query=request.query, embedding=vec, dim=len(vec))
 
 
-@app.post("/generate", tags=["Generation"])
+@app.post("/generate", response_model=GenerateResponse, tags=["Generation"])
 async def generate(request: GenerateRequest):
     """
-    Blocking LLM generation.
+    LLM generation from query + retrieved chunks.
 
     The client sends:
-        - query:   the user's question
-        - chunks:  the top-K chunk texts retrieved on-device (can be empty for general queries)
-        - history: previous conversation turns (optional)
+        query:   user's question
+        chunks:  top-K texts from on-device RAG (empty list for general questions)
+        history: previous [user, ai, user, ai ...] turns
 
-    Returns the full response as a JSON object:
-        { "response": "...", "intent": "lab" }
+    Generation runs in a thread pool so it never blocks the async event loop.
     """
     if _llm is None or not _llm._loaded:
         raise HTTPException(
             status_code=503,
-            detail=(
-                "LLM not loaded. Place the model file at the configured path and restart. "
-                "See /health for current status."
-            ),
+            detail="LLM not loaded. Check /health for status.",
         )
 
-    intent       = classify_intent(request.query)
+    intent = classify_intent(request.query)
+
+    # Reject off-topic queries immediately — no LLM call, instant response
+    if intent == "off_topic":
+        log.info(f"Off-topic query rejected: {request.query!r}")
+        return GenerateResponse(response=OFF_TOPIC_RESPONSE, intent="off_topic")
+
+    # Enforce server-side context window: keep last MAX_HISTORY_TURNS turns
+    trimmed_history = request.history[-(MAX_HISTORY_TURNS * 2):] if request.history else []
+
     system_prompt = get_system_prompt(intent)
     max_tokens    = get_max_tokens(intent)
-    user_prompt   = build_context(request.query, request.chunks, request.history)
+    user_prompt   = build_context(request.query, request.chunks, trimmed_history)
 
-    log.info(f"Generating [{intent}] — {len(request.chunks)} chunks, max_tokens={max_tokens}")
+    log.info(f"Generate [{intent}] — {len(request.chunks)} chunks, "
+             f"history={len(trimmed_history)//2} turns, max_tokens={max_tokens}")
 
+    # Run blocking LLM call in the default thread pool executor.
+    # This keeps the async event loop free to handle other requests
+    # (e.g. /health checks, uploads) while generation is in progress.
+    loop = asyncio.get_running_loop()
     try:
-        response = _llm.generate(system_prompt, user_prompt, max_tokens=max_tokens)
+        response = await loop.run_in_executor(
+            None,
+            lambda: _llm.generate(system_prompt, user_prompt, max_tokens=max_tokens),
+        )
     except GenerationError as e:
         raise HTTPException(status_code=500, detail=str(e))
 
     response = apply_safety_layer(response, request.query)
+    return GenerateResponse(response=response, intent=intent)
 
-    return {"response": response, "intent": intent}
+
+# ── v2 compatibility routes ───────────────────────────────────────────────────
+# Accept old /endpoint/{profile_id} URLs. profile_id is ignored.
+
+@app.post("/generate/{profile_id}", response_model=GenerateResponse, tags=["v2 compat"])
+async def generate_compat(profile_id: str, request: GenerateRequest):
+    log.info(f"v2 compat: /generate/{profile_id}")
+    return await generate(request)
 
 
-@app.post("/generate/stream", tags=["Generation"])
-async def generate_stream(request: GenerateRequest):
-    """
-    Streaming SSE LLM generation.
+@app.post("/query/{profile_id}", response_model=GenerateResponse, tags=["v2 compat"])
+async def query_compat(profile_id: str, request: GenerateRequest):
+    log.info(f"v2 compat: /query/{profile_id}")
+    return await generate(request)
 
-    Returns a text/event-stream response.
-    Each SSE event contains one token:
-        data: <token>\\n\\n
 
-    Special events:
-        data: [INTENT]:<intent>\\n\\n   — sent first, tells UI the query type
-        data: [DONE]\\n\\n              — signals end of generation
-        data: [ERROR]:<message>\\n\\n   — sent if generation fails mid-stream
+@app.post("/upload-and-embed/{profile_id}", response_model=UploadResponse, tags=["v2 compat"])
+async def upload_compat(profile_id: str, file: UploadFile = File(...)):
+    log.info(f"v2 compat: /upload-and-embed/{profile_id}")
+    return await upload_and_embed(file)
 
-    The safety disclaimer is appended as regular tokens at the end,
-    before the [DONE] event.
 
-    Client usage (JavaScript):
-        const es = new EventSource('/generate/stream', { method: 'POST', body: ... });
-        es.onmessage = (e) => {
-            if (e.data === '[DONE]') { es.close(); return; }
-            appendToChat(e.data);
-        };
-    """
-    if _llm is None or not _llm._loaded:
-        raise HTTPException(
-            status_code=503,
-            detail="LLM not loaded. See /health for status.",
-        )
-
-    intent        = classify_intent(request.query)
-    system_prompt = get_system_prompt(intent)
-    max_tokens    = get_max_tokens(intent)
-    user_prompt   = build_context(request.query, request.chunks, request.history)
-    is_urgent     = detect_urgent(request.query)
-
-    log.info(f"Streaming [{intent}] — {len(request.chunks)} chunks, max_tokens={max_tokens}")
-
-    async def event_generator():
-        # First event: tell the client what intent was detected
-        yield f"data: [INTENT]:{intent}\n\n"
-
-        # If urgent, send the urgent notice first
-        if is_urgent:
-            yield f"data: {URGENT_NOTICE}\n\n"
-
-        # Stream the LLM response token by token
-        try:
-            # llama_cpp streaming is synchronous — run in a thread pool
-            # so we don't block the async event loop
-            loop = asyncio.get_event_loop()
-            token_queue = asyncio.Queue()
-
-            def run_stream():
-                try:
-                    for token in _llm.stream(system_prompt, user_prompt, max_tokens=max_tokens):
-                        loop.call_soon_threadsafe(token_queue.put_nowait, token)
-                except GenerationError as e:
-                    loop.call_soon_threadsafe(token_queue.put_nowait, f"[ERROR]:{e}")
-                finally:
-                    loop.call_soon_threadsafe(token_queue.put_nowait, None)  # sentinel
-
-            import concurrent.futures
-            executor = concurrent.futures.ThreadPoolExecutor(max_workers=1)
-            loop.run_in_executor(executor, run_stream)
-
-            while True:
-                token = await token_queue.get()
-                if token is None:
-                    break
-                if token.startswith("[ERROR]:"):
-                    yield f"data: {token}\n\n"
-                    return
-                # Escape newlines inside the token so SSE framing is valid
-                safe_token = token.replace("\n", "\\n")
-                yield f"data: {safe_token}\n\n"
-
-        except Exception as e:
-            log.error(f"Streaming error: {e}")
-            yield f"data: [ERROR]:{e}\n\n"
-            return
-
-        # Append disclaimer as final tokens
-        disclaimer_safe = DISCLAIMER.replace("\n", "\\n")
-        yield f"data: {disclaimer_safe}\n\n"
-
-        # Signal done
-        yield "data: [DONE]\n\n"
-
-    return StreamingResponse(
-        event_generator(),
-        media_type="text/event-stream",
-        headers={
-            "Cache-Control": "no-cache",
-            "X-Accel-Buffering": "no",   # disables nginx buffering
-        },
-    )
+@app.post("/embed-query/{profile_id}", response_model=EmbedQueryResponse, tags=["v2 compat"])
+async def embed_query_compat(profile_id: str, request: EmbedQueryRequest):
+    log.info(f"v2 compat: /embed-query/{profile_id}")
+    return await embed_query(request)

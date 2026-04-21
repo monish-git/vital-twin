@@ -434,6 +434,17 @@ def health_check():
     }
 
 
+@app.get("/greeting")
+def get_greeting():
+    """
+    Returns a greeting message with markdown formatting for the AI Health page.
+    Supports **bold** and *italic* parsing in the frontend.
+    """
+    return {
+        "message": "Hello **world**! This is your *personalized* health AI assistant. 🌟 Ask me anything about your wellness journey!"
+    }
+
+
 # ── 1. SUBSTANCES ────────────────────────────────────────────────────────────
 
 @app.get("/substances", dependencies=[Depends(require_api_key)],

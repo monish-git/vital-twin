@@ -1,169 +1,335 @@
-import React, { useState } from "react";
+import React, { useState, useRef } from "react";
 import {
   View,
   Text,
   StyleSheet,
-  Switch,
   ScrollView,
+  TouchableOpacity,
+  Animated,
+  LayoutAnimation,
+  Platform,
+  UIManager,
 } from "react-native";
 import Header from "./components/Header";
-
 import { useTheme } from "../context/ThemeContext";
 
-type RowProps = {
-  title: string;
-  desc: string;
-  value: boolean;
-  onChange: (v: boolean) => void;
-  colors: {
-    card: string;
-    border: string;
-    text: string;
-    sub: string;
-  };
+if (Platform.OS === "android") {
+  UIManager.setLayoutAnimationEnabledExperimental?.(true);
+}
+
+type FAQ = {
+  q: string;
+  a: string;
+  icon: string;
 };
 
-function Row({
-  title,
-  desc,
-  value,
-  onChange,
-  colors,
-}: RowProps) {
+type Section = {
+  label: string;
+  faqs: FAQ[];
+};
+
+const SECTIONS: Section[] = [
+  {
+    label: "Getting Started",
+    faqs: [
+      {
+        icon: "🚀",
+        q: "How do I set up my digital twin?",
+        a: "Open the Dashboard tab and tap 'Start Monitoring'. Grant the required health permissions and follow the 3-step onboarding. Your twin syncs automatically within 60 seconds.",
+      },
+      {
+        icon: "📱",
+        q: "Which devices does VitalTwin support?",
+        a: "VitalTwin works with Apple Health, Google Fit, Fitbit, Garmin, Samsung Health, and most Bluetooth-enabled wearables. Go to Settings → Devices to connect.",
+      },
+      {
+        icon: "🔗",
+        q: "Can I connect multiple wearables?",
+        a: "Yes — up to 5 devices simultaneously. Data is merged and deduplicated in real-time by your twin's AI model. Priority device can be set in Settings → Devices → Priority.",
+      },
+    ],
+  },
+  {
+    label: "Health Data",
+    faqs: [
+      {
+        icon: "❤️",
+        q: "What vitals does VitalTwin track?",
+        a: "Heart rate, SpO₂, HRV, respiratory rate, blood glucose (if sensor connected), sleep stages, hydration estimate, activity, stress index, and skin temperature.",
+      },
+      {
+        icon: "📊",
+        q: "How accurate are the AI health insights?",
+        a: "Our models are validated at 94–98% accuracy across core vitals. Insights are informational and not a substitute for medical advice. Always consult a doctor for clinical decisions.",
+      },
+      {
+        icon: "🕐",
+        q: "How far back does health history go?",
+        a: "Up to 24 months of history is stored securely. You can export any range as PDF or CSV from Reports → Export Data. Older data can be archived to cloud storage.",
+      },
+    ],
+  },
+  {
+    label: "Privacy & Security",
+    faqs: [
+      {
+        icon: "🔒",
+        q: "Is my health data encrypted?",
+        a: "All data is AES-256 encrypted at rest and in transit. Your twin model runs on-device — raw biometric data never leaves your phone unless you explicitly enable cloud sync.",
+      },
+      {
+        icon: "☁️",
+        q: "What does Health Cloud Sync share?",
+        a: "Only the data categories you enable in Settings → Privacy → Cloud Sync. Each toggle controls exactly what is shared. You can revoke access at any time and your data is deleted within 48 hours.",
+      },
+      {
+        icon: "🗑️",
+        q: "How do I delete all my data?",
+        a: "Go to Settings → Privacy → Delete My Data. This permanently removes all local and cloud data. This action cannot be undone. Your account will also be deactivated.",
+      },
+    ],
+  },
+  {
+    label: "Notifications & Reminders",
+    faqs: [
+      {
+        icon: "🔔",
+        q: "How do I customize smart reminders?",
+        a: "Navigate to Settings → Reminders. You can set medication schedules, hydration goals, symptom check-in times, and quiet hours. AI reminders adapt to your daily routine automatically.",
+      },
+      {
+        icon: "🚨",
+        q: "What triggers an emergency alert?",
+        a: "Heart rate above 180 bpm or below 40 bpm, SpO₂ below 90%, or a detected irregular rhythm pattern. Emergency contacts are notified if you don't respond within 2 minutes.",
+      },
+    ],
+  },
+  {
+    label: "Account & Billing",
+    faqs: [
+      {
+        icon: "💳",
+        q: "How do I manage my subscription?",
+        a: "Go to Settings → Account → Subscription. You can upgrade, downgrade, or cancel at any time. Cancellations take effect at the end of your current billing period.",
+      },
+      {
+        icon: "👨‍👩‍👧",
+        q: "Can I share my plan with family?",
+        a: "Yes — the Family Plan supports up to 6 members. Each gets a separate twin profile with independent privacy settings. Manage members in Settings → Account → Family.",
+      },
+    ],
+  },
+];
+
+function AccordionItem({
+  faq,
+  c,
+  isLast,
+}: {
+  faq: FAQ;
+  c: ReturnType<typeof getColors>;
+  isLast: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const rotateAnim = useRef(new Animated.Value(0)).current;
+
+  const toggle = () => {
+    LayoutAnimation.configureNext({
+      duration: 240,
+      create: { type: "easeInEaseOut", property: "opacity" },
+      update: { type: "easeInEaseOut" },
+    });
+    Animated.timing(rotateAnim, {
+      toValue: open ? 0 : 1,
+      duration: 220,
+      useNativeDriver: true,
+    }).start();
+    setOpen((v) => !v);
+  };
+
+  const rotate = rotateAnim.interpolate({
+    inputRange: [0, 1],
+    outputRange: ["0deg", "90deg"],
+  });
+
   return (
     <View
       style={[
-        styles.row,
-        {
-          backgroundColor: colors.card,
-          borderColor: colors.border,
-        },
+        styles.item,
+        { borderBottomColor: c.border, borderBottomWidth: isLast ? 0 : 1 },
       ]}
     >
-      <View style={{ flex: 1, paddingRight: 10 }}>
-        <Text
+      <TouchableOpacity
+        activeOpacity={0.7}
+        onPress={toggle}
+        style={styles.itemRow}
+      >
+        <View style={[styles.itemIcon, { backgroundColor: c.iconBg }]}>
+          <Text style={{ fontSize: 15 }}>{faq.icon}</Text>
+        </View>
+        <Text style={[styles.itemQ, { color: c.text1, flex: 1 }]}>{faq.q}</Text>
+        <Animated.Text
           style={[
-            styles.title,
-            { color: colors.text },
+            styles.arrow,
+            { color: c.accent, transform: [{ rotate }] },
           ]}
         >
-          {title}
-        </Text>
+          ›
+        </Animated.Text>
+      </TouchableOpacity>
 
-        <Text
-          style={[
-            styles.desc,
-            { color: colors.sub },
-          ]}
-        >
-          {desc}
-        </Text>
-      </View>
-
-      <Switch value={value} onValueChange={onChange} />
+      {open && (
+        <View style={[styles.answer, { backgroundColor: c.answerBg }]}>
+          <View style={[styles.answerAccent, { backgroundColor: c.accent }]} />
+          <Text style={[styles.answerText, { color: c.text2 }]}>{faq.a}</Text>
+        </View>
+      )}
     </View>
   );
 }
 
-export default function DataSharing() {
-  const [vitals, setVitals] = useState(true);
-  const [bio, setBio] = useState(false);
-  const [location, setLocation] = useState(true);
+function getColors(theme: string) {
+  const dark = theme === "dark";
+  return {
+    bg: dark ? "#070f1a" : "#f0f9ff",
+    card: dark ? "#0d1f35" : "#ffffff",
+    border: dark ? "rgba(14,165,233,0.12)" : "rgba(14,165,233,0.15)",
+    sectionBorder: dark ? "rgba(14,165,233,0.1)" : "rgba(14,165,233,0.12)",
+    text1: dark ? "#e2f4ff" : "#0c2340",
+    text2: dark ? "#7db8d4" : "#1e4d6b",
+    text3: dark ? "#3d6e8a" : "#4a8fa8",
+    accent: "#0ea5e9",
+    iconBg: dark ? "rgba(14,165,233,0.12)" : "rgba(14,165,233,0.08)",
+    answerBg: dark ? "rgba(14,165,233,0.05)" : "rgba(14,165,233,0.04)",
+  };
+}
 
+export default function SettingsHelp() {
   const { theme } = useTheme();
-
-  const colors =
-    theme === "light"
-      ? {
-          bg: "#f8fafc",
-          card: "#ffffff",
-          text: "#020617",
-          sub: "#64748b",
-          border: "#e2e8f0",
-        }
-      : {
-          bg: "#020617",
-          card: "#0f172a",
-          text: "#e2e8f0",
-          sub: "#64748b",
-          border: "#1e293b",
-        };
+  const c = getColors(theme);
 
   return (
-    <View
-      style={[
-        styles.container,
-        { backgroundColor: colors.bg },
-      ]}
-    >
+    <View style={[styles.root, { backgroundColor: c.bg }]}>
       <Header />
+      <ScrollView
+        contentContainerStyle={styles.scroll}
+        showsVerticalScrollIndicator={false}
+      >
+        {/* ── PAGE HEADER ── */}
+        <View style={styles.pageHeader}>
+          <View style={[styles.headerIcon, { backgroundColor: "rgba(14,165,233,0.1)" }]}>
+            <Text style={{ fontSize: 22 }}>💬</Text>
+          </View>
+          <Text style={[styles.pageTitle, { color: c.text1 }]}>Help Center</Text>
+          <Text style={[styles.pageSubtitle, { color: c.text2 }]}>
+            Find answers to common questions about VitalTwin.
+          </Text>
+        </View>
 
-      <ScrollView contentContainerStyle={styles.content}>
-        <Text
-          style={[
-            styles.header,
-            { color: colors.sub },
-          ]}
-        >
-          Health Cloud Sync — encrypted sharing
+        {/* ── SECTIONS ── */}
+        {SECTIONS.map((section, si) => (
+          <View key={si} style={styles.sectionWrap}>
+            <Text style={[styles.sectionLabel, { color: c.text3 }]}>
+              {section.label}
+            </Text>
+            <View
+              style={[
+                styles.card,
+                { backgroundColor: c.card, borderColor: c.sectionBorder },
+              ]}
+            >
+              {section.faqs.map((faq, fi) => (
+                <AccordionItem
+                  key={fi}
+                  faq={faq}
+                  c={c}
+                  isLast={fi === section.faqs.length - 1}
+                />
+              ))}
+            </View>
+          </View>
+        ))}
+
+        {/* ── CONTACT FOOTER ── */}
+        <View style={[styles.contactCard, { backgroundColor: c.card, borderColor: c.border }]}>
+          <Text style={{ fontSize: 20, marginBottom: 8 }}>🩺</Text>
+          <Text style={[styles.contactTitle, { color: c.text1 }]}>
+            Still need help?
+          </Text>
+          <Text style={[styles.contactDesc, { color: c.text2 }]}>
+            Our health support team is available 24/7 for urgent questions.
+          </Text>
+          <TouchableOpacity
+            style={[styles.contactBtn, { backgroundColor: c.accent }]}
+            activeOpacity={0.85}
+          >
+            <Text style={styles.contactBtnText}>Contact Support →</Text>
+          </TouchableOpacity>
+        </View>
+
+        <Text style={[styles.version, { color: c.text3 }]}>
+          VitalTwin v2.4.1 · help@vitaltwin.ai
         </Text>
-
-        <Row
-          title="Vitals Data"
-          desc="Heart rate, SpO₂, sleep"
-          value={vitals}
-          onChange={setVitals}
-          colors={colors}
-        />
-
-        <Row
-          title="Biometric Profile"
-          desc="Age, weight, genetics"
-          value={bio}
-          onChange={setBio}
-          colors={colors}
-        />
-
-        <Row
-          title="Location Data"
-          desc="Regional alerts"
-          value={location}
-          onChange={setLocation}
-          colors={colors}
-        />
       </ScrollView>
     </View>
   );
 }
 
 const styles = StyleSheet.create({
-  container: {
-    flex: 1,
+  root: { flex: 1 },
+  scroll: { paddingTop: 110, paddingHorizontal: 16, paddingBottom: 48 },
+
+  pageHeader: { alignItems: "center", marginBottom: 28 },
+  headerIcon: {
+    width: 56, height: 56, borderRadius: 18,
+    alignItems: "center", justifyContent: "center", marginBottom: 12,
+  },
+  pageTitle: { fontSize: 24, fontWeight: "700", marginBottom: 6 },
+  pageSubtitle: { fontSize: 13, textAlign: "center", lineHeight: 19, maxWidth: 280 },
+
+  sectionWrap: { marginBottom: 20 },
+  sectionLabel: {
+    fontSize: 11, fontWeight: "700", letterSpacing: 0.6,
+    textTransform: "uppercase", marginBottom: 8, marginLeft: 4,
+  },
+  card: {
+    borderRadius: 16, borderWidth: 1, overflow: "hidden",
   },
 
-  content: {
-    paddingTop: 110,
-    padding: 16,
+  item: {},
+  itemRow: {
+    flexDirection: "row", alignItems: "center",
+    paddingHorizontal: 14, paddingVertical: 14, gap: 12,
+  },
+  itemIcon: {
+    width: 34, height: 34, borderRadius: 10,
+    alignItems: "center", justifyContent: "center",
+  },
+  itemQ: { fontSize: 13, fontWeight: "600", lineHeight: 18 },
+  arrow: { fontSize: 22, fontWeight: "300", marginLeft: 4 },
+
+  answer: {
+    flexDirection: "row", marginHorizontal: 14,
+    marginBottom: 14, borderRadius: 12, overflow: "hidden",
+  },
+  answerAccent: { width: 3, borderRadius: 2, marginRight: 0 },
+  answerText: {
+    flex: 1, fontSize: 13, lineHeight: 20,
+    padding: 12, paddingLeft: 10,
   },
 
-  header: {
-    marginBottom: 20,
+  contactCard: {
+    borderRadius: 16, borderWidth: 1,
+    padding: 20, alignItems: "center",
+    marginBottom: 16,
   },
+  contactTitle: { fontSize: 16, fontWeight: "700", marginBottom: 6 },
+  contactDesc: { fontSize: 13, textAlign: "center", lineHeight: 19, marginBottom: 16 },
+  contactBtn: {
+    paddingHorizontal: 24, paddingVertical: 12,
+    borderRadius: 24,
+  },
+  contactBtnText: { color: "white", fontWeight: "700", fontSize: 14 },
 
-  row: {
-    padding: 16,
-    borderRadius: 14,
-    marginBottom: 14,
-    flexDirection: "row",
-    justifyContent: "space-between",
-    borderWidth: 1,
-  },
-
-  title: {
-    fontWeight: "bold",
-  },
-
-  desc: {
-    marginTop: 4,
-  },
+  version: { fontSize: 11, textAlign: "center", opacity: 0.6 },
 });

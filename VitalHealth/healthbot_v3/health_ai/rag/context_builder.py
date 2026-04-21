@@ -21,11 +21,9 @@ Context structure sent to the LLM:
 from typing import List
 
 from health_ai.core.logger import get_logger
+from health_ai.core.character import MAX_HISTORY_TURNS
 
 log = get_logger(__name__)
-
-# Maximum number of history turns to include (each turn = 1 user + 1 AI message)
-MAX_HISTORY_TURNS = 3
 
 
 def build_context(

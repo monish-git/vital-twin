@@ -43,13 +43,12 @@ import { generateEmbedding, getModelInfo, retrieveTopKChunks } from "../../servi
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
-const PROFILE_ID = "profile-1";
-const KEY_SERVER_IP = "@hai_server_ip";
+const KEY_SERVER_IP   = "@hai_server_ip";
 const KEY_SERVER_PORT = "@hai_server_port";
-const DEFAULT_PORT = "8000";
-const TOP_K = 5;
+const DEFAULT_PORT    = "8000";
+const TOP_K           = 5;
 
-// ─── Utility Functions ───────────────────────────────────────────────────────
+// ─── Utility Functions ────────────────────────────────────────────────────────
 
 const buildUrl = (ip: string, port: string) =>
   `http://${ip.trim().replace(/^https?:\/\//, "")}:${(port || "8000").trim()}`;
@@ -60,9 +59,14 @@ const fmtTime = (ts: number) =>
   new Date(ts).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
 
 const fmtDate = (ts: number) =>
-  new Date(ts).toLocaleDateString([], { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" });
+  new Date(ts).toLocaleDateString([], {
+    month: "short",
+    day: "numeric",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
 
-// ─── Types ───────────────────────────────────────────────────────────────────
+// ─── Types ────────────────────────────────────────────────────────────────────
 
 type Message = {
   id: string;
@@ -74,12 +78,12 @@ type Message = {
 type Doc = {
   id: string;
   name: string;
-  type: 'pdf' | 'image';
+  type: "pdf" | "image";
   chunkCount: number;
   uploadedAt: number;
 };
 
-// ─── Server Config Modal ─────────────────────────────────────────────────────
+// ─── Server Config Modal ──────────────────────────────────────────────────────
 
 function ServerConfigModal({
   visible,
@@ -96,10 +100,10 @@ function ServerConfigModal({
   onClose: () => void;
   c: any;
 }) {
-  const [localIp, setLocalIp] = useState(ip);
+  const [localIp, setLocalIp]     = useState(ip);
   const [localPort, setLocalPort] = useState(port);
-  const [testing, setTesting] = useState(false);
-  const [result, setResult] = useState<"ok" | "fail" | null>(null);
+  const [testing, setTesting]     = useState(false);
+  const [result, setResult]       = useState<"ok" | "fail" | null>(null);
 
   useEffect(() => {
     setLocalIp(ip);
@@ -161,7 +165,11 @@ function ServerConfigModal({
           </View>
 
           <TouchableOpacity
-            style={[styles.testBtn, { backgroundColor: c.accent }, (testing || !localIp.trim()) && { opacity: 0.5 }]}
+            style={[
+              styles.testBtn,
+              { backgroundColor: c.accent },
+              (testing || !localIp.trim()) && { opacity: 0.5 },
+            ]}
             onPress={test}
             disabled={testing || !localIp.trim()}
           >
@@ -173,9 +181,7 @@ function ServerConfigModal({
           </TouchableOpacity>
 
           {result === "ok" && (
-            <Text style={[styles.resultTxt, { color: "#10b981" }]}>
-              ✅ Server reachable!
-            </Text>
+            <Text style={[styles.resultTxt, { color: "#10b981" }]}>✅ Server reachable!</Text>
           )}
           {result === "fail" && (
             <Text style={[styles.resultTxt, { color: "#ef4444" }]}>
@@ -185,7 +191,10 @@ function ServerConfigModal({
 
           <View style={{ flexDirection: "row", marginTop: 6 }}>
             <TouchableOpacity
-              style={[styles.modalBtn, { marginRight: 10, borderWidth: 1, borderColor: c.border, backgroundColor: c.bg }]}
+              style={[
+                styles.modalBtn,
+                { marginRight: 10, borderWidth: 1, borderColor: c.border, backgroundColor: c.bg },
+              ]}
               onPress={onClose}
             >
               <Text style={[styles.modalBtnTxt, { color: c.sub }]}>Cancel</Text>
@@ -246,7 +255,9 @@ function DocViewerModal({
             📄 Extracted Text (On-Device)
           </Text>
           {docChunks.length === 0 ? (
-            <Text style={[styles.emptyTxt, { color: c.sub }]}>No text extracted for this document.</Text>
+            <Text style={[styles.emptyTxt, { color: c.sub }]}>
+              No text extracted for this document.
+            </Text>
           ) : (
             docChunks.map((ch, i) => (
               <View key={i} style={[styles.chunkCard, { backgroundColor: c.card, borderColor: c.border }]}>
@@ -262,7 +273,7 @@ function DocViewerModal({
   );
 }
 
-// ─── All Chunks Viewer Modal ────────────────────────────────────────────────────
+// ─── All Chunks Viewer Modal ──────────────────────────────────────────────────
 
 function AllChunksModal({
   chunks,
@@ -277,40 +288,24 @@ function AllChunksModal({
   onClose: () => void;
   c: any;
 }) {
-  // Print all chunks to console for debugging
-  const printChunksToConsole = () => {
-    console.log('========== ALL CHUNKS DEBUG ==========');
-    console.log(`Total chunks: ${chunks.length}`);
-    console.log(`Total documents: ${docs.length}`);
-    console.log('');
-    
-    docs.forEach(doc => {
-      const docChunks = chunks.filter(ch => ch.metadata?.docId === doc.id);
-      console.log(`Document: ${doc.name} (${doc.id})`);
-      console.log(`  Type: ${doc.type}, Chunks: ${docChunks.length}, Uploaded: ${fmtDate(doc.uploadedAt)}`);
-      
-      docChunks.forEach((ch, i) => {
-        console.log(`  Chunk ${i + 1} [${ch.id}]:`);
-        console.log(`  "${ch.text.substring(0, 100)}${ch.text.length > 100 ? '...' : ''}"`);
-        console.log('');
-      });
-    });
-    console.log('========== END DEBUG ==========');
-  };
-
-  // Show console on mount if modal opens
   useEffect(() => {
     if (visible && chunks.length > 0) {
-      printChunksToConsole();
+      console.log("========== ALL CHUNKS DEBUG ==========");
+      console.log(`Total chunks: ${chunks.length}`);
+      console.log(`Total documents: ${docs.length}`);
+      docs.forEach((doc) => {
+        const docChunks = chunks.filter((ch) => ch.metadata?.docId === doc.id);
+        console.log(`Document: ${doc.name} — ${docChunks.length} chunks`);
+      });
+      console.log("========== END DEBUG ==========");
     }
   }, [visible]);
 
   if (!visible) return null;
 
-  // Group chunks by document
-  const chunksByDoc = docs.map(doc => ({
+  const chunksByDoc = docs.map((doc) => ({
     doc,
-    chunks: chunks.filter(ch => ch.metadata?.docId === doc.id)
+    chunks: chunks.filter((ch) => ch.metadata?.docId === doc.id),
   }));
 
   return (
@@ -318,9 +313,7 @@ function AllChunksModal({
       <SafeAreaView style={{ flex: 1, backgroundColor: c.bg }}>
         <View style={[styles.docHeader, { backgroundColor: c.bg, borderBottomColor: c.border }]}>
           <View style={{ flex: 1 }}>
-            <Text style={[styles.docHeaderTitle, { color: c.text }]}>
-              📋 All Chunks
-            </Text>
+            <Text style={[styles.docHeaderTitle, { color: c.text }]}>📋 All Chunks</Text>
             <Text style={[styles.docHeaderSub, { color: c.sub }]}>
               {chunks.length} total chunks from {docs.length} documents
             </Text>
@@ -332,7 +325,7 @@ function AllChunksModal({
 
         <ScrollView style={{ flex: 1, paddingHorizontal: 14 }}>
           {chunks.length === 0 ? (
-            <View style={{ alignItems: 'center', marginTop: 40 }}>
+            <View style={{ alignItems: "center", marginTop: 40 }}>
               <Text style={[styles.emptyTxt, { color: c.sub, fontSize: 16 }]}>
                 ⚠️ No documents uploaded yet
               </Text>
@@ -343,20 +336,28 @@ function AllChunksModal({
           ) : (
             chunksByDoc.map(({ doc, chunks: docChunks }) => (
               <View key={doc.id} style={{ marginBottom: 16 }}>
-                <View style={[styles.docSectionHeader, { backgroundColor: c.card, borderColor: c.border }]}>
-                  <Text style={[styles.docSectionTitle, { color: c.text }]} numberOfLines={1}>
+                <View
+                  style={[
+                    styles.docSectionHeader,
+                    { backgroundColor: c.card, borderColor: c.border },
+                  ]}
+                >
+                  <Text
+                    style={[styles.docSectionTitle, { color: c.text }]}
+                    numberOfLines={1}
+                  >
                     📄 {doc.name}
                   </Text>
                   <Text style={[styles.docSectionSub, { color: c.sub }]}>
                     {docChunks.length} chunks · {doc.type}
                   </Text>
                 </View>
-                
                 {docChunks.map((ch, i) => (
-                  <View key={ch.id} style={[styles.chunkCard, { backgroundColor: c.bg, borderColor: c.border }]}>
-                    <Text style={[styles.chunkIdx, { color: c.accent }]}>
-                      Chunk {i + 1}
-                    </Text>
+                  <View
+                    key={ch.id}
+                    style={[styles.chunkCard, { backgroundColor: c.bg, borderColor: c.border }]}
+                  >
+                    <Text style={[styles.chunkIdx, { color: c.accent }]}>Chunk {i + 1}</Text>
                     <Text style={[styles.chunkTxt, { color: c.sub }]}>{ch.text}</Text>
                   </View>
                 ))}
@@ -387,21 +388,21 @@ function ProcessingModal({
 
   const getProgressColor = () => {
     switch (progress.stage) {
-      case 'complete': return "#10b981";
-      case 'error': return "#ef4444";
-      default: return c.accent;
+      case "complete": return "#10b981";
+      case "error":    return "#ef4444";
+      default:         return c.accent;
     }
   };
 
   const getStageIcon = () => {
     switch (progress.stage) {
-      case 'extracting': return '📝';
-      case 'chunking': return '✂️';
-      case 'embedding': return '🧠';
-      case 'storing': return '💾';
-      case 'complete': return '✅';
-      case 'error': return '❌';
-      default: return '⏳';
+      case "extracting": return "📝";
+      case "chunking":   return "✂️";
+      case "embedding":  return "🧠";
+      case "storing":    return "💾";
+      case "complete":   return "✅";
+      case "error":      return "❌";
+      default:           return "⏳";
     }
   };
 
@@ -410,20 +411,24 @@ function ProcessingModal({
       <View style={styles.processingOverlay}>
         <View style={[styles.processingCard, { backgroundColor: c.card }]}>
           <ActivityIndicator size="large" color={c.accent} />
-          <Text style={[styles.processingTitle, { color: c.text }]}>{getStageIcon()} Processing Document</Text>
-          <Text style={[styles.processingMessage, { color: c.sub }]}>{progress.message}</Text>
-          
-          {progress.stage !== 'complete' && progress.stage !== 'error' && (
+          <Text style={[styles.processingTitle, { color: c.text }]}>
+            {getStageIcon()} Processing Document
+          </Text>
+          <Text style={[styles.processingMessage, { color: c.sub }]}>
+            {progress.message}
+          </Text>
+
+          {progress.stage !== "complete" && progress.stage !== "error" && (
             <View style={[styles.progressBarContainer, { backgroundColor: c.border }]}>
-              <View 
+              <View
                 style={[
-                  styles.progressBar, 
-                  { width: `${progress.progress}%`, backgroundColor: getProgressColor() }
-                ]} 
+                  styles.progressBar,
+                  { width: `${progress.progress}%`, backgroundColor: getProgressColor() },
+                ]}
               />
             </View>
           )}
-          
+
           <TouchableOpacity style={styles.cancelBtn} onPress={onCancel}>
             <Text style={[styles.cancelBtnTxt, { color: "#ef4444" }]}>Cancel</Text>
           </TouchableOpacity>
@@ -433,98 +438,144 @@ function ProcessingModal({
   );
 }
 
-// ─── Main Component ──────────────────────────────────────────────────────────
+// ─── Rich Text Renderer ───────────────────────────────────────────────────────
+// Parses **bold**, *italic* markdown and renders as React Native Text nodes.
+
+function RichText({ text, style }: { text: string; style?: any }) {
+  const parts: React.ReactNode[] = [];
+  const regex = /\*\*(.+?)\*\*|\*(.+?)\*/gs;
+  let lastIndex = 0;
+  let match: RegExpExecArray | null;
+
+  while ((match = regex.exec(text)) !== null) {
+    // Plain text before this match
+    if (match.index > lastIndex) {
+      parts.push(
+        <Text key={`plain-${lastIndex}`} style={style}>
+          {text.slice(lastIndex, match.index)}
+        </Text>
+      );
+    }
+
+    if (match[1] !== undefined) {
+      // **bold**
+      parts.push(
+        <Text key={`bold-${match.index}`} style={[style, { fontWeight: "900" }]}>
+          {match[1]}
+        </Text>
+      );
+    } else if (match[2] !== undefined) {
+      // *italic*
+      parts.push(
+        <Text key={`italic-${match.index}`} style={[style, { fontStyle: "italic" }]}>
+          {match[2]}
+        </Text>
+      );
+    }
+
+    lastIndex = match.index + match[0].length;
+  }
+
+  // Remaining plain text
+  if (lastIndex < text.length) {
+    parts.push(
+      <Text key={`plain-end`} style={style}>
+        {text.slice(lastIndex)}
+      </Text>
+    );
+  }
+
+  return <Text style={style}>{parts}</Text>;
+}
+
+// ─── Main Component ───────────────────────────────────────────────────────────
 
 export default function AIHealthScreen() {
   const router = useRouter();
-  const { symptom, source } = useLocalSearchParams<{
-    symptom?: string;
-    source?: string;
-  }>();
+  const { symptom } = useLocalSearchParams<{ symptom?: string; source?: string }>();
   const { theme } = useTheme();
   const c = colors[theme];
 
   // Server state
-  const [serverIp, setServerIp] = useState("");
+  const [serverIp, setServerIp]     = useState("");
   const [serverPort, setServerPort] = useState(DEFAULT_PORT);
-  const [connected, setConnected] = useState(false);
+  const [connected, setConnected]   = useState(false);
   const [showConfig, setShowConfig] = useState(false);
   const [modelLoading, setModelLoading] = useState(false);
 
   // Document state
-  const [docs, setDocs] = useState<Doc[]>([]);
-  const [allChunks, setAllChunks] = useState<EmbeddedChunk[]>([]);
-  const [viewDoc, setViewDoc] = useState<Doc | null>(null);
+  const [docs, setDocs]                 = useState<Doc[]>([]);
+  const [allChunks, setAllChunks]       = useState<EmbeddedChunk[]>([]);
+  const [viewDoc, setViewDoc]           = useState<Doc | null>(null);
   const [showAllChunks, setShowAllChunks] = useState(false);
-  const [uploading, setUploading] = useState(false);
-  const [processingProgress, setProcessingProgress] = useState<ProcessingProgress | null>(null);
+  const [uploading, setUploading]       = useState(false);
+  const [processingProgress, setProcessingProgress] =
+    useState<ProcessingProgress | null>(null);
 
   // Chat state
   const [messages, setMessages] = useState<Message[]>([
     {
       id: "welcome",
-      text: "👋 Documents are processed on-device. Configure server IP (⚙️) for AI responses.",
+      text: "👋 Connecting to Dr. Aria…",
       sender: "system",
       timestamp: new Date(),
     },
   ]);
-  const [input, setInput] = useState("");
+  const [input, setInput]           = useState("");
   const [isRecording, setIsRecording] = useState(false);
-  const [loading, setLoading] = useState(false);
-  const [autoSent, setAutoSent] = useState(false);
+  const [loading, setLoading]       = useState(false);
+  const [autoSent, setAutoSent]     = useState(false);
 
-  const listRef = useRef<FlatList>(null);
-  const inputRef = useRef<TextInput>(null);
+  const listRef    = useRef<FlatList>(null);
+  const inputRef   = useRef<TextInput>(null);
   const historyRef = useRef<string[]>([]);
 
-  // Auto-send symptom from Symptom Log to AI Health
-  useEffect(() => {
-  if (!symptom || autoSent || !serverIp) return;
+  // ── Fetch greeting from server ──────────────────────────────────────────────
 
-  const userSymptom = Array.isArray(symptom)
-    ? symptom[0]
-    : symptom;
+  const fetchGreeting = async (ip: string, port: string) => {
+    try {
+      const res = await fetch(`${buildUrl(ip, port)}/greeting`);
+      if (!res.ok) throw new Error("No greeting endpoint");
+      const data = await res.json();
+      const greetingText: string =
+        data.message ||
+        "👋 Hello! I'm **Dr. Aria**, your personal health assistant. How may I help you today?";
 
-  if (!userSymptom.trim()) return;
+      setMessages([
+        {
+          id: "welcome",
+          text: greetingText,
+          sender: "ai",
+          timestamp: new Date(),
+        },
+      ]);
+    } catch {
+      // Server unreachable or no greeting endpoint — show a safe fallback
+      setMessages([
+        {
+          id: "welcome",
+          text: "👋 Hello! I'm **Dr. Aria**, your personal health assistant.\n\nConfigure the server IP (⚙️) to get started.",
+          sender: "ai",
+          timestamp: new Date(),
+        },
+      ]);
+    }
+  };
 
-  const timer = setTimeout(async () => {
-    await sendMessageWithText(userSymptom);
-    setInput(""); // ✅ Ensure input is cleared
-    setAutoSent(true);
-  }, 800);
+  // ── Load saved config and documents on mount ────────────────────────────────
 
-  return () => clearTimeout(timer);
-}, [symptom, serverIp]);
-
-  // Load saved config and docs on mount
   useEffect(() => {
     (async () => {
       try {
-        const ip = (await AsyncStorage.getItem(KEY_SERVER_IP)) || "";
+        const ip   = (await AsyncStorage.getItem(KEY_SERVER_IP))   || "";
         const port = (await AsyncStorage.getItem(KEY_SERVER_PORT)) || DEFAULT_PORT;
-        const d = await loadDocuments();
-        const ch = await loadChunks();
-        
+        const d    = await loadDocuments();
+        const ch   = await loadChunks();
+
         setServerIp(ip);
         setServerPort(port);
         setDocs(d);
         setAllChunks(ch);
-
-        // Debug logging
-// log('[AIHealth] Loaded config:', { ip, port });
-
-// log('[AIHealth] Loaded documents:', d.length);
-
-// log('[AIHealth] Loaded chunks:', ch.length);
-
-        
-        if (d.length > 0) {
-          console.log('[AIHealth] Document details:');
-          d.forEach((doc: Doc) => {
-            const docChunks = ch.filter((chunk: EmbeddedChunk) => chunk.metadata?.docId === doc.id);
-            console.log(`  - ${doc.name}: ${docChunks.length} chunks`);
-          });
-        }
 
         if (!ip) {
           setShowConfig(true);
@@ -536,44 +587,48 @@ export default function AIHealthScreen() {
           } catch {
             setConnected(false);
           }
-        }
-        
-        // Preload the embedding model in background
-        setModelLoading(true);
-        generateEmbedding("warmup").finally(() => {
-          setModelLoading(false);
-// log('[AIHealth] Embedding model ready');
 
-        });
+          // Fetch greeting from server
+          await fetchGreeting(ip, port);
+        }
+
+        // Warm up embedding model in background
+        setModelLoading(true);
+        generateEmbedding("warmup").finally(() => setModelLoading(false));
       } catch (e) {
         console.error("Error loading config:", e);
       }
     })();
   }, []);
 
-  // Update welcome message when connected
-  useEffect(() => {
-    if (connected && messages.length === 1 && messages[0].sender === "system") {
-      setMessages([
-        {
-          id: "welcome",
-          text: "Hello! I'm your AI health assistant. Documents are processed on-device for privacy. How can I help?",
-          sender: "ai",
-          timestamp: new Date(),
-        },
-      ]);
-    }
-  }, [connected]);
+  // ── Auto-send symptom from Symptom Log ─────────────────────────────────────
 
-  // Auto-scroll on new messages
+  useEffect(() => {
+    if (!symptom || autoSent || !serverIp) return;
+    const userSymptom = Array.isArray(symptom) ? symptom[0] : symptom;
+    if (!userSymptom.trim()) return;
+
+    const timer = setTimeout(async () => {
+      await sendMessageWithText(userSymptom);
+      setInput("");
+      setAutoSent(true);
+    }, 800);
+
+    return () => clearTimeout(timer);
+  }, [symptom, serverIp]);
+
+  // ── Auto-scroll on new messages ─────────────────────────────────────────────
+
   useEffect(() => {
     setTimeout(() => listRef.current?.scrollToEnd({ animated: true }), 100);
   }, [messages]);
 
-  // Save server config
+  // ── Save server config ──────────────────────────────────────────────────────
+
   const handleSaveConfig = async (ip: string, port: string) => {
-    const cleanIp = ip.trim();
+    const cleanIp   = ip.trim();
     const cleanPort = (port || DEFAULT_PORT).trim();
+
     setServerIp(cleanIp);
     setServerPort(cleanPort);
     setShowConfig(false);
@@ -589,140 +644,90 @@ export default function AIHealthScreen() {
     } catch {
       setConnected(false);
     }
+
+    // Fetch fresh greeting with the new server address
+    await fetchGreeting(cleanIp, cleanPort);
   };
 
-  // Helper function to send message with text
-  const sendMessageWithText = async (text: string) => {
-  if (!text.trim() || loading) return;
-  if (!serverIp) {
-    setShowConfig(true);
-    return;
-  }
+  // ── Core message send (shared by sendMessage and sendMessageWithText) ───────
 
-  const query = text.trim();
+  const doSend = async (query: string) => {
+    if (!query.trim() || loading) return;
+    if (!serverIp) { setShowConfig(true); return; }
 
-  // ✅ Clear the text input after sending
-  setInput("");
-
-  const userMsg: Message = {
-    id: genId(),
-    text: query,
-    sender: "user",
-    timestamp: new Date(),
-  };
-
-  setMessages((prev) => [...prev, userMsg]);
-  setLoading(true);
+    const userMsg: Message = {
+      id: genId(),
+      text: query,
+      sender: "user",
+      timestamp: new Date(),
+    };
+    setMessages((prev) => [...prev, userMsg]);
+    setLoading(true);
 
     const baseUrl = buildUrl(serverIp, serverPort);
     const history = [...historyRef.current];
 
     try {
-      let aiReply: string;
+      let topChunks: string[] = [];
 
       if (allChunks.length > 0) {
         const queryEmbedding = await generateEmbedding(query);
-        const topResults = retrieveTopKChunks(queryEmbedding, allChunks, TOP_K);
-        const topChunks = topResults.map((r) => r.chunk.text);
-
-        const genRes = await fetch(`${baseUrl}/generate`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            query,
-            chunks: topChunks,
-            history,
-          }),
-        });
-
-        if (!genRes.ok) {
-          const errorData = await genRes.json().catch(() => ({}));
-          throw new Error(errorData.detail || `Generate failed: ${genRes.status}`);
-        }
-
-        const genData = await genRes.json();
-        aiReply = genData.response;
-      } else {
-        const genRes = await fetch(`${baseUrl}/generate`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            query,
-            chunks: [],
-            history,
-          }),
-        });
-
-        if (!genRes.ok) {
-          const errorData = await genRes.json().catch(() => ({}));
-          throw new Error(errorData.detail || `Generate failed: ${genRes.status}`);
-        }
-
-        const genData = await genRes.json();
-        aiReply = genData.response;
+        topChunks = retrieveTopKChunks(queryEmbedding, allChunks, TOP_K).map(
+          (r) => r.chunk.text
+        );
       }
 
-      const aiMsg: Message = {
-        id: genId(),
-        text: aiReply || "No response from server.",
-        sender: "ai",
-        timestamp: new Date(),
-      };
+      const genRes = await fetch(`${baseUrl}/generate`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ query, chunks: topChunks, history }),
+      });
 
-      setMessages((prev) => [...prev, aiMsg]);
+      if (!genRes.ok) {
+        const err = await genRes.json().catch(() => ({}));
+        throw new Error(err.detail || `Generate failed: ${genRes.status}`);
+      }
+
+      const genData  = await genRes.json();
+      const aiReply: string = genData.response || "No response from server.";
+
+      setMessages((prev) => [
+        ...prev,
+        { id: genId(), text: aiReply, sender: "ai", timestamp: new Date() },
+      ]);
       historyRef.current = [...history, query, aiReply].slice(-10);
       setConnected(true);
     } catch (e: any) {
       setConnected(false);
       setMessages((prev) => [
         ...prev,
-        {
-          id: genId(),
-          text: `❌ ${e.message}`,
-          sender: "system",
-          timestamp: new Date(),
-        },
+        { id: genId(), text: `❌ ${e.message}`, sender: "system", timestamp: new Date() },
       ]);
     } finally {
       setLoading(false);
     }
   };
 
-  // Handle document upload - ON-DEVICE PROCESSING
+  const sendMessage          = async () => { const q = input.trim(); setInput(""); await doSend(q); };
+  const sendMessageWithText  = async (text: string) => { setInput(""); await doSend(text); };
+
+  // ── Document upload ─────────────────────────────────────────────────────────
+
   const handleUpload = async (type: "pdf" | "image") => {
     setUploading(true);
-    setProcessingProgress({
-      stage: 'extracting',
-      progress: 0,
-      message: 'Selecting document...',
-    });
+    setProcessingProgress({ stage: "extracting", progress: 0, message: "Selecting document…" });
 
     try {
-      // Pick document
-      let document;
-      if (type === "image") {
-        document = await pickImage();
-      } else {
-        document = await pickDocument();
-      }
+      const document = type === "image" ? await pickImage() : await pickDocument();
+      if (!document) { setUploading(false); setProcessingProgress(null); return; }
 
-      if (!document) {
-        setUploading(false);
-        setProcessingProgress(null);
-        return;
-      }
-
-      // Process document on-device
       const { document: newDoc, chunks: newChunks } = await processDocument(document, {
         chunkSize: 500,
         chunkOverlap: 100,
-        onProgress: (progress) => {
-          setProcessingProgress(progress);
-        },
+        onProgress: setProcessingProgress,
       });
 
-      // Update state
-      const updatedDocs = [...docs, newDoc];
+      const updatedDocs   = [...docs, newDoc];
       const updatedChunks = [...allChunks, ...newChunks];
 
       setDocs(updatedDocs);
@@ -732,7 +737,7 @@ export default function AIHealthScreen() {
 
       Alert.alert(
         "✅ Document Processed",
-        `"${newDoc.name}" - ${newDoc.chunkCount} chunks created and embedded on-device.`
+        `"${newDoc.name}" — ${newDoc.chunkCount} chunks created on-device.`
       );
     } catch (e: any) {
       Alert.alert("Error", e.message || "Failed to process document");
@@ -742,147 +747,41 @@ export default function AIHealthScreen() {
     }
   };
 
-  // Send message - EMBED QUERY ON-DEVICE, ONLY SEND CHUNKS TO SERVER
-  const sendMessage = async () => {
-    if (!input.trim() || loading) return;
-    if (!serverIp) {
-      setShowConfig(true);
-      return;
-    }
-
-    const query = input.trim();
-    setInput("");
-
-    const userMsg: Message = {
-      id: genId(),
-      text: query,
-      sender: "user",
-      timestamp: new Date(),
-    };
-
-    setMessages((prev) => [...prev, userMsg]);
-    setLoading(true);
-
-    const baseUrl = buildUrl(serverIp, serverPort);
-    const history = [...historyRef.current];
-
-    try {
-      let aiReply: string;
-      let intent = "general";
-
-      if (allChunks.length > 0) {
-        // ON-DEVICE: Generate query embedding and retrieve top-K chunks
-// log('[AIHealth] Generating embedding on-device...');
-
-        
-        const queryEmbedding = await generateEmbedding(query);
-        const topResults = retrieveTopKChunks(queryEmbedding, allChunks, TOP_K);
-        const topChunks = topResults.map(r => r.chunk.text);
-
-// log(`[AIHealth] Retrieved top ${topChunks.length} chunks on-device`);
-
-
-        // Send only the TOP K CHUNKS to server for LLM generation (healthbot_v3 API)
-        const genRes = await fetch(`${baseUrl}/generate`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ 
-            query, 
-            chunks: topChunks,
-            history 
-          }),
-        });
-
-        if (!genRes.ok) {
-          const errorData = await genRes.json().catch(() => ({}));
-          throw new Error(errorData.detail || `Generate failed: ${genRes.status}`);
-        }
-
-        const genData = await genRes.json();
-        aiReply = genData.response;
-        intent = genData.intent || "general";
-      } else {
-        // No chunks - use regular query without RAG
-        const genRes = await fetch(`${baseUrl}/generate`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ 
-            query, 
-            chunks: [],
-            history 
-          }),
-        });
-
-        if (!genRes.ok) {
-          const errorData = await genRes.json().catch(() => ({}));
-          throw new Error(errorData.detail || `Generate failed: ${genRes.status}`);
-        }
-
-        const genData = await genRes.json();
-        aiReply = genData.response;
-        intent = genData.intent || "general";
-      }
-
-      const aiMsg: Message = {
-        id: genId(),
-        text: aiReply || "No response from server.",
-        sender: "ai",
-        timestamp: new Date(),
-      };
-
-      setMessages((prev) => [...prev, aiMsg]);
-      historyRef.current = [...history, query, aiReply].slice(-10);
-      setConnected(true);
-    } catch (e: any) {
-      setConnected(false);
-      const errorMsg: Message = {
-        id: genId(),
-        text: `❌ ${e.message}`,
-        sender: "system",
-        timestamp: new Date(),
-      };
-      setMessages((prev) => [...prev, errorMsg]);
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // Handle file attachment
-  const handleFile = async () => {
+  const handleFile = () => {
     Alert.alert("Upload Document", "Document will be processed on-device", [
-      { text: "PDF / Lab Report", onPress: () => handleUpload("pdf") },
-      { text: "Prescription Image", onPress: () => handleUpload("image") },
+      { text: "PDF / Lab Report",      onPress: () => handleUpload("pdf") },
+      { text: "Prescription Image",    onPress: () => handleUpload("image") },
       { text: "Cancel", style: "cancel" },
     ]);
   };
 
-  // Handle voice input
   const handleVoice = () => {
     if (isRecording) {
       setIsRecording(false);
-      const simulatedVoiceText = "How can I improve my sleep?";
-      setInput(simulatedVoiceText);
-      setTimeout(() => sendMessage(), 500);
+      const text = "How can I improve my sleep?";
+      setInput(text);
+      setTimeout(sendMessage, 500);
     } else {
       setIsRecording(true);
       setTimeout(() => {
         setIsRecording(false);
-        const simulatedVoiceText = "Tell me about headache remedies";
-        setInput(simulatedVoiceText);
+        setInput("Tell me about headache remedies");
       }, 2000);
-      Alert.alert("Voice Input", "Recording... Speak clearly");
+      Alert.alert("Voice Input", "Recording… Speak clearly");
     }
   };
 
-  // Get bubble colors based on theme
-  const getUserBubbleColor = () => theme === "light" ? "#2563eb" : "#3b82f6";
-  const getAiBubbleColor = () => theme === "light" ? "#f1f5f9" : "#1e293b";
-  const getUserBubbleBorder = () => theme === "light" ? "#1d4ed8" : "#2563eb";
-  const getAiBubbleBorder = () => theme === "light" ? "#e2e8f0" : "#334155";
+  // ── Bubble colours ──────────────────────────────────────────────────────────
 
-  // Render message
+  const getUserBubbleColor  = () => (theme === "light" ? "#2563eb" : "#3b82f6");
+  const getAiBubbleColor    = () => (theme === "light" ? "#f1f5f9" : "#1e293b");
+  const getUserBubbleBorder = () => (theme === "light" ? "#1d4ed8" : "#2563eb");
+  const getAiBubbleBorder   = () => (theme === "light" ? "#e2e8f0" : "#334155");
+
+  // ── Message renderer ────────────────────────────────────────────────────────
+
   const renderMessage = ({ item }: { item: Message }) => {
-    const isUser = item.sender === "user";
+    const isUser   = item.sender === "user";
     const isSystem = item.sender === "system";
 
     if (isSystem) {
@@ -896,12 +795,7 @@ export default function AIHealthScreen() {
     }
 
     return (
-      <View
-        style={[
-          styles.messageRow,
-          { justifyContent: isUser ? "flex-end" : "flex-start" },
-        ]}
-      >
+      <View style={[styles.messageRow, { justifyContent: isUser ? "flex-end" : "flex-start" }]}>
         {!isUser && (
           <View style={[styles.avatar, { backgroundColor: c.card, borderColor: c.border }]}>
             <Text style={{ fontSize: 14 }}>🩺</Text>
@@ -913,24 +807,15 @@ export default function AIHealthScreen() {
             isUser ? styles.userBubble : styles.aiBubble,
             {
               backgroundColor: isUser ? getUserBubbleColor() : getAiBubbleColor(),
-              borderColor: isUser ? getUserBubbleBorder() : getAiBubbleBorder(),
+              borderColor:     isUser ? getUserBubbleBorder() : getAiBubbleBorder(),
             },
           ]}
         >
-          <Text
-            style={[
-              styles.messageText,
-              { color: isUser ? "#ffffff" : c.text },
-            ]}
-          >
-            {item.text}
-          </Text>
-          <Text
-            style={[
-              styles.messageTime,
-              { color: isUser ? "#ffffff80" : c.sub },
-            ]}
-          >
+          <RichText
+            text={item.text}
+            style={[styles.messageText, { color: isUser ? "#ffffff" : c.text }]}
+          />
+          <Text style={[styles.messageTime, { color: isUser ? "#ffffff80" : c.sub }]}>
             {fmtTime(item.timestamp.getTime())}
           </Text>
         </View>
@@ -938,30 +823,23 @@ export default function AIHealthScreen() {
     );
   };
 
-  const modelInfo = getModelInfo();
+  // ── Render ──────────────────────────────────────────────────────────────────
 
   return (
     <SafeAreaView style={[styles.safe, { backgroundColor: c.bg }]}>
       <StatusBar style={theme === "dark" ? "light" : "dark"} backgroundColor={c.bg} />
-      
-      {/* Global Header */}
+
       <Header />
 
-      {/* Header - Fixed padding */}
+      {/* Page header */}
       <View
-  style={[
-    styles.header,
-    {
-      backgroundColor: c.bg,
-      borderBottomColor: c.border,
-      paddingTop: 110,
-    },
-  ]}
->
-  <View style={styles.headerLeft}>
-    <Text style={[styles.headerTitle, { color: c.text }]}>
-      🩺 Health AI
-    </Text>
+        style={[
+          styles.header,
+          { backgroundColor: c.bg, borderBottomColor: c.border, paddingTop: 110 },
+        ]}
+      >
+        <View style={styles.headerLeft}>
+          <Text style={[styles.headerTitle, { color: c.text }]}>🩺 Health AI</Text>
           <View style={styles.statusContainer}>
             <View
               style={[
@@ -974,15 +852,13 @@ export default function AIHealthScreen() {
             </Text>
           </View>
         </View>
+
         <View style={styles.headerRight}>
           <TouchableOpacity
             onPress={() => setShowConfig(true)}
             style={[styles.urlPill, { borderColor: c.border, backgroundColor: c.card }]}
           >
-            <Text
-              style={[styles.urlPillTxt, { color: c.accent }]}
-              numberOfLines={1}
-            >
+            <Text style={[styles.urlPillTxt, { color: c.accent }]} numberOfLines={1}>
               {serverIp ? buildUrl(serverIp, serverPort) : "⚙ Set server IP"}
             </Text>
           </TouchableOpacity>
@@ -992,45 +868,33 @@ export default function AIHealthScreen() {
         </View>
       </View>
 
-      {/* RAG Status Bar - ON-DEVICE */}
-      {/* RAG Status Bar - Visible Only When Documents Exist */}
-{allChunks.length > 0 && (
-  <View
-    style={[
-      styles.ragBar,
-      { backgroundColor: c.card, borderBottomColor: c.border },
-    ]}
-  >
-    <TouchableOpacity
-      style={{ flexDirection: "row", alignItems: "center" }}
-      onPress={() => setShowAllChunks(true)}
-    >
-      <Text style={[styles.ragBarTxt, { color: c.accent }]}>
-        🔍 On-device RAG · {allChunks.length} chunks
-      </Text>
-      {modelLoading && (
-        <ActivityIndicator
-          size="small"
-          color={c.accent}
-          style={{ marginLeft: 8 }}
-        />
+      {/* RAG status bar — only shown when documents exist */}
+      {allChunks.length > 0 && (
+        <View style={[styles.ragBar, { backgroundColor: c.card, borderBottomColor: c.border }]}>
+          <TouchableOpacity
+            style={{ flexDirection: "row", alignItems: "center" }}
+            onPress={() => setShowAllChunks(true)}
+          >
+            <Text style={[styles.ragBarTxt, { color: c.accent }]}>
+              🔍 On-device RAG · {allChunks.length} chunks
+            </Text>
+            {modelLoading && (
+              <ActivityIndicator size="small" color={c.accent} style={{ marginLeft: 8 }} />
+            )}
+          </TouchableOpacity>
+          <TouchableOpacity onPress={() => handleUpload("pdf")}>
+            <Text style={[styles.ragBarTxt, { color: c.sub }]}>+ Upload</Text>
+          </TouchableOpacity>
+        </View>
       )}
-    </TouchableOpacity>
 
-    <TouchableOpacity onPress={() => handleUpload("pdf")}>
-      <Text style={[styles.ragBarTxt, { color: c.sub }]}>+ Upload</Text>
-    </TouchableOpacity>
-  </View>
-)}
-
-      {/* Main Content - Fixed Keyboard Avoiding View */}
+      {/* Chat + input */}
       <KeyboardAvoidingView
         style={styles.flex}
         behavior={Platform.OS === "ios" ? "padding" : "height"}
         keyboardVerticalOffset={Platform.OS === "ios" ? 90 : 0}
       >
         <View style={[styles.container, { backgroundColor: c.bg }]}>
-          {/* Messages */}
           <FlatList
             ref={listRef}
             data={messages}
@@ -1042,15 +906,8 @@ export default function AIHealthScreen() {
             keyboardShouldPersistTaps="handled"
           />
 
-          {/* Input Bar */}
           <View
-            style={[
-              styles.inputContainer,
-              {
-                backgroundColor: c.card,
-                borderTopColor: c.border,
-              },
-            ]}
+            style={[styles.inputContainer, { backgroundColor: c.card, borderTopColor: c.border }]}
           >
             <TouchableOpacity onPress={handleFile} style={styles.iconButton}>
               <Ionicons name="attach" size={24} color={c.sub} />
@@ -1061,7 +918,7 @@ export default function AIHealthScreen() {
                 ref={inputRef}
                 value={input}
                 onChangeText={setInput}
-                placeholder="Ask about your health..."
+                placeholder="Ask about your health…"
                 placeholderTextColor={c.sub}
                 style={[styles.input, { color: c.text }]}
                 multiline
@@ -1072,11 +929,7 @@ export default function AIHealthScreen() {
             </View>
 
             <TouchableOpacity onPress={handleVoice} style={styles.iconButton}>
-              <Ionicons
-                name="mic"
-                size={24}
-                color={isRecording ? "#ef4444" : c.accent}
-              />
+              <Ionicons name="mic" size={24} color={isRecording ? "#ef4444" : c.accent} />
             </TouchableOpacity>
 
             <TouchableOpacity
@@ -1101,7 +954,7 @@ export default function AIHealthScreen() {
         </View>
       </KeyboardAvoidingView>
 
-      {/* Server Config Modal */}
+      {/* Modals */}
       <ServerConfigModal
         visible={showConfig}
         ip={serverIp}
@@ -1110,27 +963,18 @@ export default function AIHealthScreen() {
         onClose={() => setShowConfig(false)}
         c={c}
       />
-
-      {/* Document Viewer Modal */}
       <DocViewerModal
         doc={viewDoc}
         chunks={allChunks}
         onClose={() => setViewDoc(null)}
         c={c}
       />
-
-      {/* Processing Modal */}
       <ProcessingModal
         visible={uploading}
         progress={processingProgress}
-        onCancel={() => {
-          setUploading(false);
-          setProcessingProgress(null);
-        }}
+        onCancel={() => { setUploading(false); setProcessingProgress(null); }}
         c={c}
       />
-
-      {/* All Chunks Viewer Modal */}
       <AllChunksModal
         chunks={allChunks}
         docs={docs}
@@ -1145,53 +989,24 @@ export default function AIHealthScreen() {
 // ─── Styles ───────────────────────────────────────────────────────────────────
 
 const styles = StyleSheet.create({
-  safe: {
-    flex: 1,
-  },
-  flex: {
-    flex: 1,
-  },
-  container: {
-    flex: 1,
-  },
+  safe:      { flex: 1 },
+  flex:      { flex: 1 },
+  container: { flex: 1 },
 
-  // Header - Fixed spacing
   header: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
     paddingHorizontal: 14,
-    paddingVertical: 8, // Reduced from 40 to 8
+    paddingVertical: 8,
     borderBottomWidth: 1,
   },
-  headerLeft: {
-    flex: 1,
-  },
-  headerRight: {
-    flexDirection: "row",
-    alignItems: "center",
-  },
-  headerTitle: {
-    fontSize: 18,
-    fontWeight: "800",
-    lineHeight: 22,
-    marginBottom: 0, // Ensure no bottom margin
-  },
-  statusContainer: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginTop: 0, // Removed margin top
-  },
-  statusDot: {
-    width: 7,
-    height: 7,
-    borderRadius: 4,
-    marginRight: 4,
-  },
-  statusLabel: {
-    fontSize: 11,
-    lineHeight: 14,
-  },
+  headerLeft:  { flex: 1 },
+  headerRight: { flexDirection: "row", alignItems: "center" },
+  headerTitle: { fontSize: 18, fontWeight: "800", lineHeight: 22 },
+  statusContainer: { flexDirection: "row", alignItems: "center", marginTop: 0 },
+  statusDot:   { width: 7, height: 7, borderRadius: 4, marginRight: 4 },
+  statusLabel: { fontSize: 11, lineHeight: 14 },
   urlPill: {
     paddingHorizontal: 8,
     paddingVertical: 4,
@@ -1204,14 +1019,9 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace",
   },
-  iconBtn: {
-    padding: 4,
-  },
-  iconBtnTxt: {
-    fontSize: 18,
-  },
+  iconBtn:    { padding: 4 },
+  iconBtnTxt: { fontSize: 18 },
 
-  // RAG Bar
   ragBar: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -1220,22 +1030,10 @@ const styles = StyleSheet.create({
     paddingVertical: 6,
     borderBottomWidth: 1,
   },
-  ragBarTxt: {
-    fontSize: 11,
-    fontWeight: "600",
-  },
+  ragBarTxt: { fontSize: 11, fontWeight: "600" },
 
-  // Messages
-  messagesList: {
-    paddingHorizontal: 16,
-    paddingBottom: 10,
-    paddingTop: 10,
-  },
-  messageRow: {
-    flexDirection: "row",
-    alignItems: "flex-end",
-    marginBottom: 8,
-  },
+  messagesList:  { paddingHorizontal: 16, paddingBottom: 10, paddingTop: 10 },
+  messageRow:    { flexDirection: "row", alignItems: "flex-end", marginBottom: 8 },
   avatar: {
     width: 32,
     height: 32,
@@ -1246,46 +1044,16 @@ const styles = StyleSheet.create({
     marginRight: 8,
     marginBottom: 2,
   },
-  messageBubble: {
-    maxWidth: "75%",
-    padding: 12,
-    borderRadius: 18,
-    borderWidth: 1,
-  },
-  userBubble: {
-    borderBottomRightRadius: 4,
-    marginLeft: 8,
-  },
-  aiBubble: {
-    borderBottomLeftRadius: 4,
-  },
-  messageText: {
-    fontSize: 15,
-    lineHeight: 20,
-  },
-  messageTime: {
-    fontSize: 10,
-    marginTop: 4,
-    alignSelf: "flex-end",
-  },
+  messageBubble: { maxWidth: "75%", padding: 12, borderRadius: 18, borderWidth: 1 },
+  userBubble:    { borderBottomRightRadius: 4, marginLeft: 8 },
+  aiBubble:      { borderBottomLeftRadius: 4 },
+  messageText:   { fontSize: 15, lineHeight: 20 },
+  messageTime:   { fontSize: 10, marginTop: 4, alignSelf: "flex-end" },
 
-  // System message
-  sysRow: {
-    alignItems: "center",
-    marginVertical: 5,
-  },
-  sysPill: {
-    borderRadius: 12,
-    paddingHorizontal: 14,
-    paddingVertical: 5,
-    borderWidth: 1,
-  },
-  sysTxt: {
-    fontSize: 12,
-    fontStyle: "italic",
-  },
+  sysRow: { alignItems: "center", marginVertical: 5 },
+  sysPill: { borderRadius: 12, paddingHorizontal: 14, paddingVertical: 5, borderWidth: 1 },
+  sysTxt:  { fontSize: 12, fontStyle: "italic" },
 
-  // Input
   inputContainer: {
     flexDirection: "row",
     alignItems: "center",
@@ -1313,7 +1081,6 @@ const styles = StyleSheet.create({
     fontSize: 15,
     paddingHorizontal: 16,
     paddingVertical: 8,
-    margin: 0,
     textAlignVertical: "center",
   },
   sendButton: {
@@ -1324,7 +1091,6 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
 
-  // Modal
   modalOverlay: {
     flex: 1,
     backgroundColor: "#00000088",
@@ -1332,30 +1098,10 @@ const styles = StyleSheet.create({
     alignItems: "center",
     padding: 20,
   },
-  modalCard: {
-    borderRadius: 20,
-    padding: 24,
-    width: "100%",
-    maxWidth: 400,
-    borderWidth: 1,
-  },
-  modalTitle: {
-    fontSize: 20,
-    fontWeight: "800",
-    marginBottom: 6,
-  },
-  modalSub: {
-    fontSize: 13,
-    marginBottom: 18,
-    lineHeight: 19,
-  },
-  fieldLabel: {
-    fontSize: 11,
-    fontWeight: "600",
-    textTransform: "uppercase",
-    letterSpacing: 0.8,
-    marginBottom: 6,
-  },
+  modalCard:    { borderRadius: 20, padding: 24, width: "100%", maxWidth: 400, borderWidth: 1 },
+  modalTitle:   { fontSize: 20, fontWeight: "800", marginBottom: 6 },
+  modalSub:     { fontSize: 13, marginBottom: 18, lineHeight: 19 },
+  fieldLabel:   { fontSize: 11, fontWeight: "600", textTransform: "uppercase", letterSpacing: 0.8, marginBottom: 6 },
   fieldRow: {
     flexDirection: "row",
     alignItems: "center",
@@ -1364,44 +1110,19 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     marginBottom: 14,
   },
-  fieldIcon: {
-    fontSize: 16,
-    marginRight: 8,
-  },
+  fieldIcon:  { fontSize: 16, marginRight: 8 },
   fieldInput: {
     flex: 1,
     paddingVertical: 12,
     fontSize: 15,
     fontFamily: Platform.OS === "ios" ? "Menlo" : "monospace",
   },
-  testBtn: {
-    borderRadius: 10,
-    paddingVertical: 12,
-    alignItems: "center",
-    marginBottom: 10,
-  },
-  testBtnTxt: {
-    color: "#fff",
-    fontWeight: "700",
-    fontSize: 14,
-  },
-  resultTxt: {
-    fontSize: 13,
-    fontWeight: "600",
-    marginBottom: 8,
-  },
-  modalBtn: {
-    flex: 1,
-    borderRadius: 10,
-    paddingVertical: 12,
-    alignItems: "center",
-  },
-  modalBtnTxt: {
-    fontWeight: "700",
-    fontSize: 15,
-  },
+  testBtn:    { borderRadius: 10, paddingVertical: 12, alignItems: "center", marginBottom: 10 },
+  testBtnTxt: { color: "#fff", fontWeight: "700", fontSize: 14 },
+  resultTxt:  { fontSize: 13, fontWeight: "600", marginBottom: 8 },
+  modalBtn:   { flex: 1, borderRadius: 10, paddingVertical: 12, alignItems: "center" },
+  modalBtnTxt:{ fontWeight: "700", fontSize: 15 },
 
-  // Document Viewer
   docHeader: {
     flexDirection: "row",
     alignItems: "center",
@@ -1409,35 +1130,13 @@ const styles = StyleSheet.create({
     paddingVertical: 12,
     borderBottomWidth: 1,
   },
-  docHeaderTitle: {
-    fontSize: 16,
-    fontWeight: "700",
-  },
-  docHeaderSub: {
-    fontSize: 11,
-    marginTop: 2,
-  },
-  sectionHead: {
-    fontSize: 15,
-    fontWeight: "700",
-  },
-  chunkCard: {
-    borderRadius: 10,
-    padding: 12,
-    borderWidth: 1,
-    marginBottom: 10,
-  },
-  chunkIdx: {
-    fontSize: 11,
-    fontWeight: "600",
-    marginBottom: 5,
-  },
-  chunkTxt: {
-    fontSize: 13,
-    lineHeight: 20,
-  },
-  
-  // All Chunks Viewer
+  docHeaderTitle: { fontSize: 16, fontWeight: "700" },
+  docHeaderSub:   { fontSize: 11, marginTop: 2 },
+  sectionHead:    { fontSize: 15, fontWeight: "700" },
+  chunkCard:      { borderRadius: 10, padding: 12, borderWidth: 1, marginBottom: 10 },
+  chunkIdx:       { fontSize: 11, fontWeight: "600", marginBottom: 5 },
+  chunkTxt:       { fontSize: 13, lineHeight: 20 },
+
   docSectionHeader: {
     flexDirection: "row",
     justifyContent: "space-between",
@@ -1448,22 +1147,10 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     marginBottom: 10,
   },
-  docSectionTitle: {
-    fontSize: 14,
-    fontWeight: "700",
-    flex: 1,
-    marginRight: 8,
-  },
-  docSectionSub: {
-    fontSize: 11,
-  },
-  emptyTxt: {
-    fontSize: 13,
-    textAlign: "center",
-    marginTop: 20,
-  },
+  docSectionTitle: { fontSize: 14, fontWeight: "700", flex: 1, marginRight: 8 },
+  docSectionSub:   { fontSize: 11 },
+  emptyTxt:        { fontSize: 13, textAlign: "center", marginTop: 20 },
 
-  // Processing Modal
   processingOverlay: {
     flex: 1,
     backgroundColor: "#000000aa",
@@ -1471,23 +1158,9 @@ const styles = StyleSheet.create({
     alignItems: "center",
     padding: 20,
   },
-  processingCard: {
-    borderRadius: 20,
-    padding: 24,
-    width: "80%",
-    alignItems: "center",
-  },
-  processingTitle: {
-    fontSize: 18,
-    fontWeight: "700",
-    marginTop: 16,
-    marginBottom: 8,
-  },
-  processingMessage: {
-    fontSize: 14,
-    textAlign: "center",
-    marginBottom: 16,
-  },
+  processingCard:    { borderRadius: 20, padding: 24, width: "80%", alignItems: "center" },
+  processingTitle:   { fontSize: 18, fontWeight: "700", marginTop: 16, marginBottom: 8 },
+  processingMessage: { fontSize: 14, textAlign: "center", marginBottom: 16 },
   progressBarContainer: {
     width: "100%",
     height: 8,
@@ -1495,15 +1168,7 @@ const styles = StyleSheet.create({
     overflow: "hidden",
     marginBottom: 16,
   },
-  progressBar: {
-    height: "100%",
-    borderRadius: 4,
-  },
-  cancelBtn: {
-    paddingVertical: 8,
-    paddingHorizontal: 24,
-  },
-  cancelBtnTxt: {
-    fontWeight: "600",
-  },
+  progressBar: { height: "100%", borderRadius: 4 },
+  cancelBtn:   { paddingVertical: 8, paddingHorizontal: 24 },
+  cancelBtnTxt:{ fontWeight: "600" },
 });

@@ -5,7 +5,7 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
-const DEFAULT_BASE_URL = 'http://10.239.133.79:8000';  // Your laptop's local Wi-Fi IP
+const DEFAULT_BASE_URL = 'http:/10.66.213.41/:8000';  // Your laptop's local Wi-Fi IP
 const BASE_URL_KEY = '@biogears_base_url';
 
 export async function getBiogearsBaseUrl(): Promise<string> {
@@ -393,6 +393,14 @@ export async function getTwinProfile(userId: string): Promise<any> {
  */
 export async function getSubstances(): Promise<{ substances: Record<string, string[]>; total: number }> {
   return apiFetch('/substances', undefined, 10_000);
+}
+
+
+/**
+ * Get greeting message from BioGears server for AI Health page
+ */
+export async function getGreeting(): Promise<{ message: string }> {
+  return apiFetch('/greeting', undefined, 5000);
 }
 
 
